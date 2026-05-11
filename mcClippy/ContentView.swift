@@ -76,12 +76,18 @@ struct ContentView: View {
             list
         }
         .background(.regularMaterial)
-        .focusable()
-        .focusEffectDisabled()
-        .onKeyPress(.escape) { panelClose(); return .handled }
-        .onKeyPress(.upArrow) { moveSelection(by: -1); return .handled }
-        .onKeyPress(.downArrow) { moveSelection(by: 1); return .handled }
-        .onKeyPress(.return) { pasteSelected(); return .handled }
+        .onReceive(NotificationCenter.default.publisher(for: .panelMoveSelectionUp)) { _ in
+            moveSelection(by: -1)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .panelMoveSelectionDown)) { _ in
+            moveSelection(by: 1)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .panelPasteSelected)) { _ in
+            pasteSelected()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .panelDismiss)) { _ in
+            panelClose()
+        }
         .onAppear {
             searchFocused = true
             if selectedID == nil { selectedID = filteredItems.first?.id }
@@ -187,7 +193,7 @@ struct ContentView: View {
                         searchText.isEmpty ? "No Clipboard Items" : "No Matches",
                         systemImage: searchText.isEmpty ? "clipboard" : "magnifyingglass",
                         description: Text(searchText.isEmpty
-                            ? "Copy something to start your history."
+                            ? "Copy something, then press \(ShortcutStore.shared.current.displayString) to see it here."
                             : "Try a different search.")
                     )
                 }
@@ -334,9 +340,9 @@ private struct ClipboardRow: View {
             }
             .buttonStyle(.plain)
 
-            if item.isSensitive || isHovered || isSelected {
-                rowActions
-            }
+            rowActions
+                .opacity(item.isSensitive || isHovered || isSelected ? 1 : 0)
+                .allowsHitTesting(item.isSensitive || isHovered || isSelected)
         }
         .padding(8)
         .background(
@@ -391,6 +397,7 @@ private struct ClipboardRow: View {
                 }
                 .buttonStyle(.plain)
                 .help(isSensitiveRevealed ? "Hide sensitive preview" : "Reveal sensitive preview")
+                .accessibilityLabel(isSensitiveRevealed ? "Hide sensitive preview" : "Reveal sensitive preview")
             }
 
             Button(action: togglePin) {
@@ -399,6 +406,7 @@ private struct ClipboardRow: View {
             }
             .buttonStyle(.plain)
             .help(item.isPinned ? "Unpin" : "Pin")
+            .accessibilityLabel(item.isPinned ? "Unpin" : "Pin")
 
             Menu {
                 Button("Paste as Text", systemImage: "textformat", action: pasteAsText)
@@ -410,6 +418,7 @@ private struct ClipboardRow: View {
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .fixedSize()
+            .accessibilityLabel("More actions")
         }
         .foregroundStyle(.secondary)
     }

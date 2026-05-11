@@ -11,6 +11,7 @@ final class OnboardingController {
     static let shared = OnboardingController()
     private let defaultsKey = "mcClippy.hasSeenOnboarding"
     private var window: NSWindow?
+    private var closeObserver: NSObjectProtocol?
 
     private init() {}
 
@@ -38,6 +39,15 @@ final class OnboardingController {
         window.center()
         window.isReleasedWhenClosed = false
         self.window = window
+        // Whether the user clicks "Get Started" or the red traffic-light, persist
+        // the seen flag so the welcome window doesn't reappear every launch.
+        closeObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: window,
+            queue: .main
+        ) { _ in
+            UserDefaults.standard.set(true, forKey: "mcClippy.hasSeenOnboarding")
+        }
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
     }

@@ -98,6 +98,8 @@ struct ShortcutRecorderView: View {
     @ObservedObject private var store = ShortcutStore.shared
     @State private var isRecording = false
     @State private var monitor: Any?
+    @State private var resignObserver: NSObjectProtocol?
+    @State private var justSaved = false
 
     var body: some View {
         HStack {
@@ -106,22 +108,34 @@ struct ShortcutRecorderView: View {
             Button {
                 toggleRecording()
             } label: {
-                Text(isRecording ? "Press combo…" : store.current.displayString)
-                    .frame(minWidth: 110)
+                Text(isRecording ? "Press combo… (Esc to cancel)" : store.current.displayString)
+                    .frame(minWidth: 160)
                     .padding(.vertical, 4)
                     .padding(.horizontal, 10)
                     .background(
                         RoundedRectangle(cornerRadius: 6)
-                            .stroke(isRecording ? Color.accentColor : Color.secondary.opacity(0.4), lineWidth: 1)
+                            .stroke(strokeColor, lineWidth: 1)
                     )
                     .foregroundStyle(isRecording ? Color.accentColor : Color.primary)
                     .font(.system(.body, design: .monospaced))
             }
             .buttonStyle(.plain)
+            if justSaved {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                    .transition(.opacity)
+            }
             Button("Reset") { store.current = .default }
                 .controlSize(.small)
         }
+        .animation(.easeInOut(duration: 0.15), value: justSaved)
         .onDisappear { stopRecording() }
+    }
+
+    private var strokeColor: Color {
+        if isRecording { return .accentColor }
+        if justSaved { return .green }
+        return .secondary.opacity(0.4)
     }
 
     private func toggleRecording() {
@@ -131,16 +145,32 @@ struct ShortcutRecorderView: View {
     private func startRecording() {
         isRecording = true
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            // Esc cancels recording, no rebind.
+            if event.keyCode == 53 {
+                DispatchQueue.main.async { self.stopRecording() }
+                return nil
+            }
             let nsFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             let carbon = ShortcutSpec.carbonFlags(from: nsFlags)
-            // Reject bare keys with no modifiers (would conflict with normal typing)
+            // Reject bare keys with no modifiers (would conflict with normal typing).
             guard carbon != 0 else { return event }
             let spec = ShortcutSpec(keyCode: UInt32(event.keyCode), modifierFlags: carbon)
             DispatchQueue.main.async {
                 ShortcutStore.shared.current = spec
                 self.stopRecording()
+                self.flashSaved()
             }
             return nil
+        }
+        // If the Settings window loses key status mid-recording, abort —
+        // otherwise we'd silently capture the user's next keypress when they
+        // return to the app.
+        resignObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didResignKeyNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            DispatchQueue.main.async { self.stopRecording() }
         }
     }
 
@@ -148,5 +178,16 @@ struct ShortcutRecorderView: View {
         isRecording = false
         if let monitor { NSEvent.removeMonitor(monitor) }
         monitor = nil
+        if let observer = resignObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        resignObserver = nil
+    }
+
+    private func flashSaved() {
+        justSaved = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
+            justSaved = false
+        }
     }
 }

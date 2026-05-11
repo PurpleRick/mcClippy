@@ -54,12 +54,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct MenuBarControlsView: View {
     @Environment(\.modelContext) private var modelContext
     @Query private var items: [Item]
+    @ObservedObject private var shortcutStore = ShortcutStore.shared
 
     var body: some View {
-        Button("Show Paste History") {
+        Button("Show Paste History  \(shortcutStore.current.displayString)") {
             PasteHistoryPanelController.shared.toggle()
         }
-        .keyboardShortcut("v", modifiers: [.command, .shift])
 
         SettingsLink {
             Label("Settings...", systemImage: "gearshape")
@@ -108,7 +108,7 @@ struct SettingsView: View {
             AboutSettingsView()
                 .tabItem { Label("About", systemImage: "info.circle") }
         }
-        .frame(width: 500, height: 460)
+        .frame(minWidth: 500, minHeight: 460)
     }
 }
 
@@ -284,6 +284,7 @@ final class PasteHistoryPanelController {
     private var panel: KeyablePanel?
     private var modelContainer: ModelContainer?
     private var resignObserver: NSObjectProtocol?
+    private var keyMonitor: Any?
     private(set) var previousFrontmostApp: NSRunningApplication?
 
     private init() {
@@ -320,10 +321,44 @@ final class PasteHistoryPanelController {
         positionPanel(panel)
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
+        installKeyMonitor()
     }
 
     func close() {
+        removeKeyMonitor()
         panel?.orderOut(nil)
+    }
+
+    private func installKeyMonitor() {
+        removeKeyMonitor()
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            guard PasteHistoryPanelController.shared.panel?.isKeyWindow == true else {
+                return event
+            }
+            switch event.keyCode {
+            case 126: // up arrow
+                NotificationCenter.default.post(name: .panelMoveSelectionUp, object: nil)
+                return nil
+            case 125: // down arrow
+                NotificationCenter.default.post(name: .panelMoveSelectionDown, object: nil)
+                return nil
+            case 36, 76: // return / numpad enter
+                NotificationCenter.default.post(name: .panelPasteSelected, object: nil)
+                return nil
+            case 53: // escape
+                NotificationCenter.default.post(name: .panelDismiss, object: nil)
+                return nil
+            default:
+                return event
+            }
+        }
+    }
+
+    private func removeKeyMonitor() {
+        if let monitor = keyMonitor {
+            NSEvent.removeMonitor(monitor)
+            keyMonitor = nil
+        }
     }
 
     private func makePanel(modelContainer: ModelContainer) -> KeyablePanel {
@@ -369,10 +404,21 @@ final class PasteHistoryPanelController {
         let mouse = NSEvent.mouseLocation
         let screen = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) ?? NSScreen.main
         guard let visible = screen?.visibleFrame else { return }
-        let size = panel.frame.size
+
+        // Shrink the panel if it's taller/wider than the available space (small
+        // laptop screens, huge Dock, etc.) so it never gets pinned off-screen.
+        var size = panel.frame.size
+        size.width = min(size.width, max(280, visible.width - 16))
+        size.height = min(size.height, max(240, visible.height - 16))
+        if size != panel.frame.size {
+            panel.setContentSize(size)
+        }
+
+        let maxX = max(visible.minX + 8, visible.maxX - size.width - 8)
+        let maxY = max(visible.minY + 8, visible.maxY - size.height - 8)
         var origin = NSPoint(x: mouse.x - 40, y: mouse.y - size.height - 8)
-        origin.x = min(max(origin.x, visible.minX + 8), visible.maxX - size.width - 8)
-        origin.y = min(max(origin.y, visible.minY + 8), visible.maxY - size.height - 8)
+        origin.x = min(max(origin.x, visible.minX + 8), maxX)
+        origin.y = min(max(origin.y, visible.minY + 8), maxY)
         panel.setFrameOrigin(origin)
     }
 }
@@ -537,11 +583,40 @@ enum PasteboardSerializer {
         NSPasteboard.PasteboardType("com.apple.is-remote-clipboard"),
     ]
 
+    /// Bundle IDs of known password / secret managers. Anything copied while one
+    /// of these is frontmost is force-flagged as sensitive even if the content
+    /// itself doesn't match any pattern (auto-generated random passwords often
+    /// match nothing).
+    static let passwordManagerBundleIDs: Set<String> = [
+        "com.agilebits.onepassword7",
+        "com.agilebits.onepassword",
+        "com.1password.1password",
+        "com.bitwarden.desktop",
+        "com.nordvpn.macos.NordPass",
+        "com.nordsec.nordpass",
+        "com.lastpass.LastPass",
+        "org.keepassxc.keepassxc",
+        "com.dashlane.dashlanephonefinal",
+        "com.dashlane.Dashlane",
+        "com.apple.Passwords",
+        "com.proton.pass.electron",
+        "me.proton.pass",
+        "io.enpass.app",
+        "com.roboform.RoboForm",
+        "com.stickypassword.Sticky-Password",
+    ]
+
+    static func isPasswordManagerSource(_ bundleID: String?) -> Bool {
+        guard let bundleID else { return false }
+        return passwordManagerBundleIDs.contains(bundleID)
+    }
+
     static func snapshot(from pasteboard: NSPasteboard) -> ClipboardSnapshot? {
         if let types = pasteboard.types, types.contains(where: concealedTypes.contains) {
             return nil
         }
         let sourceApp = NSWorkspace.shared.frontmostApplication
+        let sourceIsPM = isPasswordManagerSource(sourceApp?.bundleIdentifier)
 
         if let image = NSImage(pasteboard: pasteboard),
            let data = image.tiffRepresentation {
@@ -552,7 +627,7 @@ enum PasteboardSerializer {
                 contentHash: hash(data),
                 sourceAppBundleId: sourceApp?.bundleIdentifier,
                 sourceAppName: sourceApp?.localizedName,
-                isSensitive: false,
+                isSensitive: sourceIsPM,
                 sizeBytes: data.count
             )
         }
@@ -567,7 +642,7 @@ enum PasteboardSerializer {
                 contentHash: hash(data),
                 sourceAppBundleId: sourceApp?.bundleIdentifier,
                 sourceAppName: sourceApp?.localizedName,
-                isSensitive: false,
+                isSensitive: sourceIsPM,
                 sizeBytes: data.count
             )
         }
@@ -581,7 +656,7 @@ enum PasteboardSerializer {
                 contentHash: hash(data),
                 sourceAppBundleId: sourceApp?.bundleIdentifier,
                 sourceAppName: sourceApp?.localizedName,
-                isSensitive: SensitiveContentDetector.looksSensitive(html),
+                isSensitive: sourceIsPM || SensitiveContentDetector.looksSensitive(html),
                 sizeBytes: data.count
             )
         }
@@ -596,7 +671,7 @@ enum PasteboardSerializer {
                 contentHash: hash(data),
                 sourceAppBundleId: sourceApp?.bundleIdentifier,
                 sourceAppName: sourceApp?.localizedName,
-                isSensitive: SensitiveContentDetector.looksSensitive(text),
+                isSensitive: sourceIsPM || SensitiveContentDetector.looksSensitive(text),
                 sizeBytes: data.count
             )
         }
@@ -676,12 +751,41 @@ enum PasteboardSerializer {
 
 enum SensitiveContentDetector {
     static func looksSensitive(_ value: String) -> Bool {
-        let lowercased = value.lowercased()
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        let lowered = trimmed.lowercased()
         let markers = ["password", "passwd", "api_key", "apikey", "secret", "token", "bearer ", "private key"]
-        if markers.contains(where: lowercased.contains) { return true }
-        if value.range(of: #"(?i)(sk|pk)_[a-z0-9]{20,}"#, options: .regularExpression) != nil { return true }
-        if value.range(of: #"[A-Za-z0-9+/]{40,}={0,2}"#, options: .regularExpression) != nil { return true }
+        if markers.contains(where: lowered.contains) { return true }
+        // Stripe / OpenAI / generic provider keys
+        if trimmed.range(of: #"(?i)(sk|pk|rk)_[a-z0-9]{20,}"#, options: .regularExpression) != nil { return true }
+        // GitHub PATs
+        if trimmed.range(of: #"gh[pousr]_[A-Za-z0-9]{20,}"#, options: .regularExpression) != nil { return true }
+        // JWT-like (base64.base64.base64) with the `eyJ` header prefix
+        if trimmed.range(of: #"eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"#, options: .regularExpression) != nil { return true }
+        // Padded base64 of at least 24 chars (much tighter than before — plain URLs
+        // and long single-line prose don't carry `=` padding).
+        if trimmed.range(of: #"^[A-Za-z0-9+/]{24,}={1,2}$"#, options: .regularExpression) != nil { return true }
+        // Random-looking password: short string, no whitespace, mixed character classes.
+        if looksLikePassword(trimmed) { return true }
         return false
+    }
+
+    /// Detects auto-generated password style strings:
+    /// 8–64 chars, no whitespace, doesn't look like a URL, and contains at
+    /// least 3 of the 4 character classes (upper / lower / digit / special).
+    /// Hits 1Password/NordPass defaults while leaving long URLs alone.
+    static func looksLikePassword(_ value: String) -> Bool {
+        guard value.count >= 8, value.count <= 64 else { return false }
+        if value.contains(where: { $0.isWhitespace || $0.isNewline }) { return false }
+        // URL-shaped strings: explicit scheme, or starts with `www.`
+        if value.contains("://") { return false }
+        if value.hasPrefix("www.") { return false }
+        let hasUpper = value.contains(where: { $0.isUppercase })
+        let hasLower = value.contains(where: { $0.isLowercase })
+        let hasDigit = value.contains(where: { $0.isNumber })
+        let hasSpecial = value.contains(where: { !$0.isLetter && !$0.isNumber })
+        let classes = [hasUpper, hasLower, hasDigit, hasSpecial].filter { $0 }.count
+        return classes >= 3
     }
 }
 
@@ -771,6 +875,10 @@ final class GlobalShortcutManager {
 
 extension Notification.Name {
     static let pasteHistoryShortcutPressed = Notification.Name("pasteHistoryShortcutPressed")
+    static let panelMoveSelectionUp = Notification.Name("panelMoveSelectionUp")
+    static let panelMoveSelectionDown = Notification.Name("panelMoveSelectionDown")
+    static let panelPasteSelected = Notification.Name("panelPasteSelected")
+    static let panelDismiss = Notification.Name("panelDismiss")
 }
 
 private extension UInt32 {
