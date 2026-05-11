@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.0.2
+
+- Fixed Enter/select auto-paste reliability by posting Command+V back to the target app.
+- Improved local install signing stability for Accessibility permission testing.
+- Reduced image-heavy UI memory work with cached thumbnails and lighter image capture.
+- Published a packaged GitHub release artifact so users can install without Xcode.
+
+## 1.0.1
+
 - Added menu bar clipboard history app shell.
 - Added floating keyboard-first history panel.
 - Added Shift+Command+V global shortcut with customizable recorder.

@@ -87,8 +87,8 @@ Full details under [`mcClippy/Documentation/`](mcClippy/Documentation/).
 Push a `v*.*.*` tag. GitHub Actions builds, ad-hoc signs, packages, and publishes to Releases.
 
 ```bash
-git tag v1.0.1
-git push origin v1.0.1
+git tag v1.0.2
+git push origin v1.0.2
 ```
 
 The workflow lives in [`.github/workflows/release.yml`](.github/workflows/release.yml) and has commented stubs for adding Developer ID signing + notarytool when you get a paid Apple Developer account.
