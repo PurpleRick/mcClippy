@@ -1,0 +1,118 @@
+//
+//  Onboarding.swift
+//  mcClippy
+//
+
+import AppKit
+import SwiftUI
+
+@MainActor
+final class OnboardingController {
+    static let shared = OnboardingController()
+    private let defaultsKey = "mcClippy.hasSeenOnboarding"
+    private var window: NSWindow?
+
+    private init() {}
+
+    var hasSeen: Bool {
+        UserDefaults.standard.bool(forKey: defaultsKey)
+    }
+
+    func showIfNeeded() {
+        guard !hasSeen else { return }
+        show()
+    }
+
+    func show() {
+        if let window {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        let view = OnboardingView { [weak self] in self?.dismiss() }
+        let host = NSHostingController(rootView: view)
+        let window = NSWindow(contentViewController: host)
+        window.title = "Welcome to mcClippy"
+        window.styleMask = [.titled, .closable]
+        window.setContentSize(NSSize(width: 520, height: 460))
+        window.center()
+        window.isReleasedWhenClosed = false
+        self.window = window
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    func dismiss() {
+        UserDefaults.standard.set(true, forKey: defaultsKey)
+        window?.close()
+    }
+}
+
+private struct OnboardingView: View {
+    let onFinish: () -> Void
+
+    @ObservedObject private var shortcutStore = ShortcutStore.shared
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(spacing: 14) {
+                Image(systemName: "clipboard")
+                    .font(.system(size: 36))
+                    .foregroundStyle(.tint)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Welcome to mcClippy").font(.title2.weight(.semibold))
+                    Text("Local-first clipboard history for macOS.")
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 10) {
+                Row(icon: "keyboard", title: "Press \(shortcutStore.current.displayString) anywhere",
+                    message: "Opens a floating panel near your cursor. Arrow keys move, Return pastes, Esc closes. Rebind it in Settings → General.")
+                Row(icon: "lock.shield", title: "Encrypted at rest",
+                    message: "Captured content is sealed with ChaChaPoly and a Keychain key — only this Mac can read it.")
+                Row(icon: "eye.slash", title: "Sensitive items are blurred",
+                    message: "Passwords, tokens, and API keys are auto-detected and hidden until you click the eye. Paste still works while blurred — safe for screen shares.")
+                Row(icon: "key.slash", title: "Skips password managers",
+                    message: "Pasteboards marked as concealed (1Password, Bitwarden, etc.) are ignored.")
+                Row(icon: "nosign", title: "Per-app exclusions",
+                    message: "Add bundle IDs in Settings → Exclusions to skip captures while those apps are frontmost.")
+            }
+
+            Spacer(minLength: 0)
+
+            HStack {
+                Spacer()
+                Button("Get Started", action: onFinish)
+                    .keyboardShortcut(.defaultAction)
+                    .controlSize(.large)
+            }
+        }
+        .padding(24)
+        .frame(width: 520, height: 460, alignment: .topLeading)
+    }
+}
+
+private struct Row: View {
+    let icon: String
+    let title: String
+    let message: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 18))
+                .foregroundStyle(.tint)
+                .frame(width: 24)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.body.weight(.semibold))
+                Text(message)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+}
