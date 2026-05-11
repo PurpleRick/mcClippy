@@ -1,0 +1,152 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version (e.g. 1.0.0) — creates tag v<version>'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build, sign (ad-hoc), and publish
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Select latest stable Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Resolve version and tag
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+            TAG="v${VERSION}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+            VERSION="${TAG#v}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Building version ${VERSION} (tag ${TAG})"
+
+      - name: Build (Release, ad-hoc signed)
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project mcClippy.xcodeproj \
+            -scheme mcClippy \
+            -configuration Release \
+            -destination 'platform=macOS' \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGN_STYLE=Manual \
+            DEVELOPMENT_TEAM="" \
+            CODE_SIGNING_REQUIRED=YES \
+            CODE_SIGNING_ALLOWED=YES \
+            MARKETING_VERSION="${VERSION}" \
+            CURRENT_PROJECT_VERSION="${GITHUB_RUN_NUMBER}" \
+            build
+          test -d build/Build/Products/Release/mcClippy.app
+
+      - name: Verify signature
+        run: |
+          codesign -dvv build/Build/Products/Release/mcClippy.app
+          codesign --verify --deep --strict --verbose=2 build/Build/Products/Release/mcClippy.app
+
+      - name: Package zip and checksum
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd build/Build/Products/Release
+          ditto -c -k --keepParent mcClippy.app "${GITHUB_WORKSPACE}/mcClippy-${VERSION}.zip"
+          cd "${GITHUB_WORKSPACE}"
+          shasum -a 256 "mcClippy-${VERSION}.zip" > "mcClippy-${VERSION}.zip.sha256"
+          ls -lh "mcClippy-${VERSION}.zip"
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          NOTES_FILE="$(mktemp)"
+          cat > "$NOTES_FILE" <<'EOF'
+          ## Install
+
+          1. Download `mcClippy-VERSION_PLACEHOLDER.zip` below.
+          2. Unzip and drag `mcClippy.app` to `/Applications`.
+          3. **First launch only** (ad-hoc signed build): right-click the app → **Open**, or run:
+             ```sh
+             xattr -dr com.apple.quarantine /Applications/mcClippy.app
+             ```
+          4. Press `⌘⇧V` anywhere to open the panel.
+
+          Requires macOS 14.0 or later.
+
+          ---
+          EOF
+          sed -i '' "s/VERSION_PLACEHOLDER/${VERSION}/g" "$NOTES_FILE"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" \
+              "mcClippy-${VERSION}.zip" \
+              "mcClippy-${VERSION}.zip.sha256" \
+              --clobber
+          else
+            gh release create "$TAG" \
+              --title "mcClippy ${VERSION}" \
+              --notes-file "$NOTES_FILE" \
+              --generate-notes \
+              "mcClippy-${VERSION}.zip" \
+              "mcClippy-${VERSION}.zip.sha256"
+          fi
+
+# ---
+# To switch from ad-hoc to Developer ID + notarization later:
+#
+# 1. Add repository secrets:
+#    APPLE_CERT_BASE64        base64 of your Developer ID Application .p12
+#    APPLE_CERT_PASSWORD      password for the .p12
+#    APPLE_TEAM_ID            10-char team ID
+#    APPLE_NOTARY_USER        Apple ID email
+#    APPLE_NOTARY_PASSWORD    app-specific password
+#
+# 2. Before the build step, import the cert into a temp keychain:
+#      security create-keychain -p "" build.keychain
+#      security default-keychain -s build.keychain
+#      security unlock-keychain -p "" build.keychain
+#      echo "$APPLE_CERT_BASE64" | base64 -d > cert.p12
+#      security import cert.p12 -k build.keychain -P "$APPLE_CERT_PASSWORD" -T /usr/bin/codesign
+#      security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" build.keychain
+#
+# 3. Replace CODE_SIGN_IDENTITY="-" with:
+#      CODE_SIGN_IDENTITY="Developer ID Application"
+#      DEVELOPMENT_TEAM="$APPLE_TEAM_ID"
+#
+# 4. After build, notarize + staple:
+#      xcrun notarytool submit "mcClippy-${VERSION}.zip" \
+#        --apple-id "$APPLE_NOTARY_USER" \
+#        --team-id "$APPLE_TEAM_ID" \
+#        --password "$APPLE_NOTARY_PASSWORD" \
+#        --wait
+#      xcrun stapler staple build/Build/Products/Release/mcClippy.app
+#      # repackage the zip with the stapled app
