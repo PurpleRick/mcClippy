@@ -2,6 +2,8 @@
 
 Local-first, Win+V-style clipboard history for macOS. Lives in your menu bar, opens with a configurable shortcut, and pastes back into the app you were in.
 <img width="770" height="984" alt="image" src="https://github.com/user-attachments/assets/3aa488b3-3990-48cf-a353-9ba07e434a06" />
+<img width="723" height="753" alt="image" src="https://github.com/user-attachments/assets/66d2e99b-4c44-49f2-b6f9-08f85b624c92" />
+
 
 ![macOS](https://img.shields.io/badge/macOS-14%2B-blue) ![License](https://img.shields.io/badge/license-MIT-green)
 
