@@ -16,7 +16,8 @@ If Accessibility permission is not granted, mcClippy still restores the selected
 - Clipboard data is stored locally.
 - Data blobs are encrypted at rest with ChaChaPoly.
 - Sensitive-looking previews are hidden by default.
-- Concealed/transient pasteboards and known password-manager pasteboard markers are skipped.
+- Concealed/transient pasteboards and known password-manager pasteboard markers are captured as sensitive items when supported content is present.
+- Regular and pinned items both default to clearing once per Mac reboot; each retention policy can be changed separately in Settings.
 - App exclusions skip captures while selected bundle IDs are frontmost.
 
 ## Requirements

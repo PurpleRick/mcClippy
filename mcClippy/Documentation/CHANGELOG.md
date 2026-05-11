@@ -8,11 +8,11 @@
 - Added text, rich text, image, URL, and file URL capture.
 - Added encrypted `dataBlob` storage using ChaChaPoly and Keychain.
 - Added sensitive preview masking and reveal controls.
-- Added password-manager/concealed pasteboard skipping.
+- Changed password-manager/concealed pasteboards to be captured as masked sensitive rows when content is present.
 - Added app exclusions.
 - Added auto-paste through Accessibility and CGEvent Command+V posting.
 - Added launch-at-login setting.
-- Added configurable history count, max age, and max item size.
+- Added configurable history count, max item size, and separate regular/pinned retention policies.
 - Added Settings link to the menu bar extra.
 - Added rich text restore with HTML and plain-text pasteboard representations.
 - Added clear unpinned, clear sensitive, clear images, and clear all controls.

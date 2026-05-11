@@ -35,7 +35,7 @@ final class OnboardingController {
         let window = NSWindow(contentViewController: host)
         window.title = "Welcome to mcClippy"
         window.styleMask = [.titled, .closable]
-        window.setContentSize(NSSize(width: 520, height: 460))
+        window.setContentSize(NSSize(width: 520, height: 500))
         window.center()
         window.isReleasedWhenClosed = false
         self.window = window
@@ -62,6 +62,7 @@ private struct OnboardingView: View {
     let onFinish: () -> Void
 
     @ObservedObject private var shortcutStore = ShortcutStore.shared
+    @ObservedObject private var shortcutManager = GlobalShortcutManager.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -79,14 +80,17 @@ private struct OnboardingView: View {
             Divider()
 
             VStack(alignment: .leading, spacing: 10) {
-                Row(icon: "keyboard", title: "Press \(shortcutStore.current.displayString) anywhere",
-                    message: "Opens a floating panel near your cursor. Arrow keys move, Return pastes, Esc closes. Rebind it in Settings → General.")
+                Row(icon: shortcutManager.registrationStatus.isRegistered ? "keyboard" : "exclamationmark.triangle",
+                    title: shortcutTitle,
+                    message: shortcutMessage)
                 Row(icon: "lock.shield", title: "Encrypted at rest",
                     message: "Captured content is sealed with ChaChaPoly and a Keychain key — only this Mac can read it.")
                 Row(icon: "eye.slash", title: "Sensitive items are blurred",
                     message: "Passwords, tokens, and API keys are auto-detected and hidden until you click the eye. Paste still works while blurred — safe for screen shares.")
-                Row(icon: "key.slash", title: "Skips password managers",
-                    message: "Pasteboards marked as concealed (1Password, Bitwarden, etc.) are ignored.")
+                Row(icon: "key", title: "Passwords stay usable",
+                    message: "Password-manager and concealed pasteboards are captured as sensitive items, masked by default, and available when you reveal or paste them.")
+                Row(icon: "clock.arrow.circlepath", title: "Windows-like by default",
+                    message: "Clipboard and pinned history clear when mcClippy starts. Change how long each type persists in Settings → General.")
                 Row(icon: "nosign", title: "Per-app exclusions",
                     message: "Add bundle IDs in Settings → Exclusions to skip captures while those apps are frontmost.")
             }
@@ -101,7 +105,21 @@ private struct OnboardingView: View {
             }
         }
         .padding(24)
-        .frame(width: 520, height: 460, alignment: .topLeading)
+        .frame(width: 520, height: 500, alignment: .topLeading)
+    }
+
+    private var shortcutTitle: String {
+        if shortcutManager.registrationStatus.isRegistered {
+            return "Press \(shortcutStore.current.displayString) anywhere"
+        }
+        return "Shortcut needs attention"
+    }
+
+    private var shortcutMessage: String {
+        if shortcutManager.registrationStatus.isRegistered {
+            return "Opens a floating panel near your cursor. Arrow keys move, Return pastes, Esc closes. Rebind it in Settings → General."
+        }
+        return shortcutManager.registrationStatus.message + " Open Settings → General to choose another combo."
     }
 }
 

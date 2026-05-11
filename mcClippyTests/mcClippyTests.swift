@@ -6,10 +6,13 @@
 //
 
 import AppKit
+import Carbon
 import Foundation
+import SwiftData
 import Testing
 @testable import mcClippy
 
+@Suite(.serialized)
 struct mcClippyTests {
     @Test func encryptionRoundTripsData() throws {
         let original = Data("token-value-that-should-round-trip".utf8)
@@ -32,6 +35,19 @@ struct mcClippyTests {
         )
 
         #expect(PasteboardSerializer.storedPreview(for: snapshot) == PasteboardSerializer.sensitivePlaceholder)
+    }
+
+    @Test func concealedPasteboardContentIsCapturedAsSensitive() {
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name(UUID().uuidString))
+        pasteboard.clearContents()
+        pasteboard.setString("Tr0ub4dor&3", forType: .string)
+        pasteboard.setData(Data(), forType: NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"))
+
+        let snapshot = PasteboardSerializer.snapshot(from: pasteboard)
+
+        #expect(snapshot?.preview == "Tr0ub4dor&3")
+        #expect(snapshot?.isSensitive == true)
+        #expect(snapshot.map(PasteboardSerializer.storedPreview(for:)) == PasteboardSerializer.sensitivePlaceholder)
     }
 
     @Test func revealedSensitivePreviewUsesDecryptedData() throws {
@@ -149,6 +165,17 @@ struct mcClippyTests {
     }
 
     @MainActor
+    @Test func shortcutRegistrationFailureExplainsConflict() {
+        let spec = ShortcutSpec(keyCode: UInt32(kVK_ANSI_V), modifierFlags: UInt32(cmdKey | shiftKey))
+        let status = ShortcutRegistrationStatus.failed(spec, status: OSStatus(eventHotKeyExistsErr))
+
+        #expect(!status.isRegistered)
+        #expect(status.message.contains("Could not register"))
+        #expect(status.message.contains("shortcut already in use"))
+        #expect(status.message.contains(spec.displayString))
+    }
+
+    @MainActor
     @Test func appExclusionsCanAddAndRemoveBundleID() {
         let id = "test.mcClippy.exclusion.\(UUID().uuidString)"
         let store = AppExclusionStore.shared
@@ -161,22 +188,116 @@ struct mcClippyTests {
     }
 
     @MainActor
-    @Test func historySettingsClampValues() {
+    @Test func privateModeAcknowledgesPasteboardChangesWithoutCapturingThem() throws {
+        let schema = Schema([Item.self])
+        let config = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
+        let container = try ModelContainer(for: schema, configurations: [config])
+        let monitor = PasteboardMonitor.shared
+        let pasteboard = NSPasteboard.general
+        let privateValue = "private-\(UUID().uuidString)"
+
+        monitor.start(modelContainer: container)
+        monitor.isPaused = false
+        monitor.privateModeUntil = nil
+
+        pasteboard.clearContents()
+        pasteboard.setString("baseline-\(UUID().uuidString)", forType: .string)
+        monitor.acknowledge(changeCount: pasteboard.changeCount)
+
+        monitor.privateModeUntil = Date().addingTimeInterval(60)
+        pasteboard.clearContents()
+        pasteboard.setString(privateValue, forType: .string)
+        monitor.tick()
+
+        monitor.privateModeUntil = Date().addingTimeInterval(-1)
+        monitor.tick()
+
+        let items = try container.mainContext.fetch(FetchDescriptor<Item>())
+        #expect(!items.contains { $0.plainTextPreview == privateValue })
+
+        monitor.privateModeUntil = nil
+    }
+
+    @MainActor
+    @Test func pausedMonitoringAcknowledgesPasteboardChangesWithoutCapturingThem() throws {
+        let schema = Schema([Item.self])
+        let config = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
+        let container = try ModelContainer(for: schema, configurations: [config])
+        let monitor = PasteboardMonitor.shared
+        let pasteboard = NSPasteboard.general
+        let pausedValue = "paused-\(UUID().uuidString)"
+
+        monitor.start(modelContainer: container)
+        monitor.isPaused = false
+        monitor.privateModeUntil = nil
+
+        pasteboard.clearContents()
+        pasteboard.setString("baseline-\(UUID().uuidString)", forType: .string)
+        monitor.acknowledge(changeCount: pasteboard.changeCount)
+
+        monitor.isPaused = true
+        pasteboard.clearContents()
+        pasteboard.setString(pausedValue, forType: .string)
+        monitor.tick()
+
+        monitor.isPaused = false
+        monitor.tick()
+
+        let items = try container.mainContext.fetch(FetchDescriptor<Item>())
+        #expect(!items.contains { $0.plainTextPreview == pausedValue })
+    }
+
+    @Test func retentionPolicyMapsDurations() {
+        #expect(ClipboardRetentionPolicy.untilReboot.maxAgeDays == nil)
+        #expect(ClipboardRetentionPolicy.forever.maxAgeDays == nil)
+        #expect(ClipboardRetentionPolicy.ageLimited(days: 1) == .oneDay)
+        #expect(ClipboardRetentionPolicy.ageLimited(days: 8) == .thirtyDays)
+        #expect(ClipboardRetentionPolicy.ageLimited(days: 999) == .oneYear)
+    }
+
+    @MainActor
+    @Test func rebootRetentionClearsRegularAndPinnedItemsByDefault() throws {
         let settings = HistorySettings.shared
-        let originalCount = settings.maxCount
-        let originalSize = settings.maxItemSizeBytes
-        let originalAge = settings.maxAgeDays
+        let originalRegularRetention = settings.regularRetentionPolicy
+        let originalPinnedRetention = settings.pinnedRetentionPolicy
+        defer {
+            settings.regularRetentionPolicy = originalRegularRetention
+            settings.pinnedRetentionPolicy = originalPinnedRetention
+            settings.resetRebootScopedHistoryMarkerForTesting()
+        }
 
-        settings.maxCount = 1
-        settings.maxItemSizeBytes = 1
-        settings.maxAgeDays = 999
+        settings.regularRetentionPolicy = .untilReboot
+        settings.pinnedRetentionPolicy = .untilReboot
+        settings.resetRebootScopedHistoryMarkerForTesting()
 
-        #expect(settings.maxCount == 10)
-        #expect(settings.maxItemSizeBytes == 64 * 1024)
-        #expect(settings.maxAgeDays == 365)
+        let schema = Schema([Item.self])
+        let config = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
+        let container = try ModelContainer(for: schema, configurations: [config])
+        let context = container.mainContext
 
-        settings.maxCount = originalCount
-        settings.maxItemSizeBytes = originalSize
-        settings.maxAgeDays = originalAge
+        context.insert(Item(
+            type: .text,
+            plainTextPreview: "regular",
+            dataBlob: Data("regular".utf8),
+            contentHash: "regular",
+            sourceAppBundleId: nil,
+            sourceAppName: nil,
+            sizeBytes: 7
+        ))
+        context.insert(Item(
+            type: .text,
+            plainTextPreview: "pinned",
+            dataBlob: Data("pinned".utf8),
+            contentHash: "pinned",
+            sourceAppBundleId: nil,
+            sourceAppName: nil,
+            isPinned: true,
+            sizeBytes: 6
+        ))
+        try context.save()
+
+        PasteboardMonitor.shared.start(modelContainer: container)
+
+        #expect(try context.fetch(FetchDescriptor<Item>()).isEmpty)
     }
 }

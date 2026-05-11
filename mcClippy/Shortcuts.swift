@@ -63,18 +63,59 @@ struct ShortcutSpec: Equatable, Codable {
     }
 }
 
+struct ShortcutRegistrationStatus: Equatable {
+    enum State: Equatable {
+        case notStarted
+        case registered
+        case failed(OSStatus)
+    }
+
+    var spec: ShortcutSpec
+    var state: State
+
+    var isRegistered: Bool {
+        if case .registered = state { return true }
+        return false
+    }
+
+    var message: String {
+        switch state {
+        case .notStarted:
+            "Shortcut will be registered when mcClippy finishes launching."
+        case .registered:
+            "\(spec.displayString) is ready."
+        case .failed(let status):
+            "Could not register \(spec.displayString). It may already be used by another app. Choose a different combo."
+                + " (\(Self.describe(status)))"
+        }
+    }
+
+    static func registered(_ spec: ShortcutSpec) -> ShortcutRegistrationStatus {
+        ShortcutRegistrationStatus(spec: spec, state: .registered)
+    }
+
+    static func failed(_ spec: ShortcutSpec, status: OSStatus) -> ShortcutRegistrationStatus {
+        ShortcutRegistrationStatus(spec: spec, state: .failed(status))
+    }
+
+    static func notStarted(_ spec: ShortcutSpec) -> ShortcutRegistrationStatus {
+        ShortcutRegistrationStatus(spec: spec, state: .notStarted)
+    }
+
+    private static func describe(_ status: OSStatus) -> String {
+        if status == eventHotKeyExistsErr { return "shortcut already in use" }
+        return "OSStatus \(status)"
+    }
+}
+
 @MainActor
 final class ShortcutStore: ObservableObject {
     static let shared = ShortcutStore()
 
     private let defaultsKey = "mcClippy.shortcut"
 
-    @Published var current: ShortcutSpec {
-        didSet {
-            persist()
-            GlobalShortcutManager.shared.reload()
-        }
-    }
+    @Published private(set) var current: ShortcutSpec
+    @Published private(set) var lastFailedShortcut: ShortcutSpec?
 
     private init() {
         if let data = UserDefaults.standard.data(forKey: defaultsKey),
@@ -82,6 +123,27 @@ final class ShortcutStore: ObservableObject {
             self.current = decoded
         } else {
             self.current = .default
+        }
+    }
+
+    @discardableResult
+    func updateShortcut(_ spec: ShortcutSpec) -> ShortcutRegistrationStatus {
+        let status = GlobalShortcutManager.shared.register(spec)
+        guard status.isRegistered else {
+            lastFailedShortcut = spec
+            return status
+        }
+        current = spec
+        lastFailedShortcut = nil
+        persist()
+        return status
+    }
+
+    func markRegistrationStatus(_ status: ShortcutRegistrationStatus) {
+        if status.isRegistered {
+            lastFailedShortcut = nil
+        } else {
+            lastFailedShortcut = status.spec
         }
     }
 
@@ -96,37 +158,47 @@ final class ShortcutStore: ObservableObject {
 
 struct ShortcutRecorderView: View {
     @ObservedObject private var store = ShortcutStore.shared
+    @ObservedObject private var shortcutManager = GlobalShortcutManager.shared
     @State private var isRecording = false
     @State private var monitor: Any?
     @State private var resignObserver: NSObjectProtocol?
     @State private var justSaved = false
+    @State private var failureMessage: String?
 
     var body: some View {
-        HStack {
-            Text("Open Paste History")
-            Spacer()
-            Button {
-                toggleRecording()
-            } label: {
-                Text(isRecording ? "Press combo… (Esc to cancel)" : store.current.displayString)
-                    .frame(minWidth: 160)
-                    .padding(.vertical, 4)
-                    .padding(.horizontal, 10)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6)
-                            .stroke(strokeColor, lineWidth: 1)
-                    )
-                    .foregroundStyle(isRecording ? Color.accentColor : Color.primary)
-                    .font(.system(.body, design: .monospaced))
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Open Paste History")
+                Spacer()
+                Button {
+                    toggleRecording()
+                } label: {
+                    Text(isRecording ? "Press combo… (Esc to cancel)" : store.current.displayString)
+                        .frame(minWidth: 160)
+                        .padding(.vertical, 4)
+                        .padding(.horizontal, 10)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(strokeColor, lineWidth: 1)
+                        )
+                        .foregroundStyle(isRecording ? Color.accentColor : Color.primary)
+                        .font(.system(.body, design: .monospaced))
+                }
+                .buttonStyle(.plain)
+                if justSaved {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                        .transition(.opacity)
+                }
+                Button("Reset") { save(.default) }
+                    .controlSize(.small)
             }
-            .buttonStyle(.plain)
-            if justSaved {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-                    .transition(.opacity)
+
+            if let statusMessage {
+                Label(statusMessage.text, systemImage: statusMessage.icon)
+                    .font(.caption)
+                    .foregroundStyle(statusMessage.color)
             }
-            Button("Reset") { store.current = .default }
-                .controlSize(.small)
         }
         .animation(.easeInOut(duration: 0.15), value: justSaved)
         .onDisappear { stopRecording() }
@@ -135,7 +207,16 @@ struct ShortcutRecorderView: View {
     private var strokeColor: Color {
         if isRecording { return .accentColor }
         if justSaved { return .green }
+        if failureMessage != nil || !shortcutManager.registrationStatus.isRegistered { return .orange }
         return .secondary.opacity(0.4)
+    }
+
+    private var statusMessage: (text: String, icon: String, color: Color)? {
+        if let failureMessage {
+            return (failureMessage, "exclamationmark.triangle.fill", .orange)
+        }
+        guard !isRecording, !shortcutManager.registrationStatus.isRegistered else { return nil }
+        return (shortcutManager.registrationStatus.message, "exclamationmark.triangle.fill", .orange)
     }
 
     private func toggleRecording() {
@@ -156,9 +237,8 @@ struct ShortcutRecorderView: View {
             guard carbon != 0 else { return event }
             let spec = ShortcutSpec(keyCode: UInt32(event.keyCode), modifierFlags: carbon)
             DispatchQueue.main.async {
-                ShortcutStore.shared.current = spec
+                self.save(spec)
                 self.stopRecording()
-                self.flashSaved()
             }
             return nil
         }
@@ -182,6 +262,16 @@ struct ShortcutRecorderView: View {
             NotificationCenter.default.removeObserver(observer)
         }
         resignObserver = nil
+    }
+
+    private func save(_ spec: ShortcutSpec) {
+        let status = store.updateShortcut(spec)
+        if status.isRegistered {
+            failureMessage = nil
+            flashSaved()
+        } else {
+            failureMessage = status.message
+        }
     }
 
     private func flashSaved() {

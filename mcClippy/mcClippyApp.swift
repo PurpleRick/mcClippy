@@ -5,6 +5,7 @@
 
 import AppKit
 import Carbon
+import Combine
 import CryptoKit
 import SwiftData
 import SwiftUI
@@ -123,7 +124,9 @@ private struct GeneralSettingsView: View {
         Form {
             Section("Shortcut") {
                 ShortcutRecorderView()
-                Text("Press this combo anywhere to open Paste History near your cursor.")
+                Text(shortcutStore.lastFailedShortcut == nil
+                     ? "Press this combo anywhere to open Paste History near your cursor."
+                     : "The configured shortcut could not be registered. Choose a different combo.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -171,7 +174,19 @@ private struct GeneralSettingsView: View {
                     get: { historySettings.maxItemSizeMegabytes },
                     set: { historySettings.maxItemSizeMegabytes = $0 }
                 ), in: 1...50)
-                Stepper(historySettings.maxAgeDays == 0 ? "Maximum age: Forever" : "Maximum age: \(historySettings.maxAgeDays) days", value: $historySettings.maxAgeDays, in: 0...365, step: 7)
+                Picker("Regular items", selection: $historySettings.regularRetentionPolicy) {
+                    ForEach(ClipboardRetentionPolicy.allCases) { policy in
+                        Text(policy.label).tag(policy)
+                    }
+                }
+                Picker("Pinned items", selection: $historySettings.pinnedRetentionPolicy) {
+                    ForEach(ClipboardRetentionPolicy.allCases) { policy in
+                        Text(policy.label).tag(policy)
+                    }
+                }
+                Text("By default, history persists until the next reboot, matching Windows clipboard history.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
@@ -266,7 +281,7 @@ private struct AboutSettingsView: View {
                 .foregroundStyle(.secondary)
             Divider()
             Label("History encrypted at rest (ChaChaPoly + Keychain).", systemImage: "lock.shield")
-            Label("Skips password-manager pasteboards.", systemImage: "key.slash")
+            Label("Password-like items are captured but masked by default.", systemImage: "key")
             Label("Sensitive previews are blurred until you reveal them.", systemImage: "eye.slash")
             Spacer()
         }
@@ -456,7 +471,9 @@ final class PasteboardMonitor {
 
     func start(modelContainer: ModelContainer) {
         self.modelContainer = modelContainer
+        clearRebootScopedHistory(in: modelContainer.mainContext)
         sanitizeSensitivePreviews(in: modelContainer.mainContext)
+        pruneHistory(in: modelContainer.mainContext)
         timer?.invalidate()
         let timer = Timer(timeInterval: 0.7, repeats: true) { _ in
             Task { @MainActor in PasteboardMonitor.shared.tick() }
@@ -474,12 +491,12 @@ final class PasteboardMonitor {
         return privateModeUntil > Date()
     }
 
-    fileprivate func tick() {
-        guard !isPaused, !isPrivate else { return }
-        let frontBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+    func tick() {
         let pb = NSPasteboard.general
         guard pb.changeCount != lastChangeCount else { return }
         lastChangeCount = pb.changeCount
+        guard !isPaused, !isPrivate else { return }
+        let frontBundleID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         if AppExclusionStore.shared.isExcluded(frontBundleID) { return }
         capture(from: pb)
     }
@@ -534,18 +551,55 @@ final class PasteboardMonitor {
             }
         }
 
-        let maxAgeDays = HistorySettings.shared.maxAgeDays
-        if maxAgeDays > 0,
-           let cutoff = Calendar.current.date(byAdding: .day, value: -maxAgeDays, to: Date()) {
-            let ageDescriptor = FetchDescriptor<Item>(
-                predicate: #Predicate { !$0.isPinned && $0.createdAt < cutoff }
-            )
-            if let stale = try? context.fetch(ageDescriptor) {
-                for item in stale { context.delete(item) }
+        pruneExpiredItems(isPinned: false, policy: HistorySettings.shared.regularRetentionPolicy, in: context)
+        pruneExpiredItems(isPinned: true, policy: HistorySettings.shared.pinnedRetentionPolicy, in: context)
+
+        try? context.save()
+    }
+
+    private func clearRebootScopedHistory(in context: ModelContext) {
+        let settings = HistorySettings.shared
+        guard settings.shouldClearRebootScopedHistory() else { return }
+
+        if settings.regularRetentionPolicy == .untilReboot,
+           settings.pinnedRetentionPolicy == .untilReboot {
+            let descriptor = FetchDescriptor<Item>()
+            if let items = try? context.fetch(descriptor) {
+                for item in items { context.delete(item) }
+            }
+            try? context.save()
+            settings.markRebootScopedHistoryCleared()
+            return
+        }
+
+        if settings.regularRetentionPolicy == .untilReboot {
+            let descriptor = FetchDescriptor<Item>(predicate: #Predicate { !$0.isPinned })
+            if let items = try? context.fetch(descriptor) {
+                for item in items { context.delete(item) }
+            }
+        }
+
+        if settings.pinnedRetentionPolicy == .untilReboot {
+            let descriptor = FetchDescriptor<Item>(predicate: #Predicate { $0.isPinned })
+            if let items = try? context.fetch(descriptor) {
+                for item in items { context.delete(item) }
             }
         }
 
         try? context.save()
+        settings.markRebootScopedHistoryCleared()
+    }
+
+    private func pruneExpiredItems(isPinned: Bool, policy: ClipboardRetentionPolicy, in context: ModelContext) {
+        guard let maxAgeDays = policy.maxAgeDays,
+              let cutoff = Calendar.current.date(byAdding: .day, value: -maxAgeDays, to: Date()) else { return }
+
+        let descriptor = FetchDescriptor<Item>(
+            predicate: #Predicate { $0.isPinned == isPinned && $0.createdAt < cutoff }
+        )
+        if let stale = try? context.fetch(descriptor) {
+            for item in stale { context.delete(item) }
+        }
     }
 
     private func sanitizeSensitivePreviews(in context: ModelContext) {
@@ -575,7 +629,7 @@ struct ClipboardSnapshot {
 enum PasteboardSerializer {
     static let sensitivePlaceholder = "Sensitive - hidden"
 
-    private static let concealedTypes: [NSPasteboard.PasteboardType] = [
+    private static let sensitiveMarkerTypes: [NSPasteboard.PasteboardType] = [
         NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"),
         NSPasteboard.PasteboardType("org.nspasteboard.TransientType"),
         NSPasteboard.PasteboardType("org.nspasteboard.AutoGeneratedType"),
@@ -612,11 +666,10 @@ enum PasteboardSerializer {
     }
 
     static func snapshot(from pasteboard: NSPasteboard) -> ClipboardSnapshot? {
-        if let types = pasteboard.types, types.contains(where: concealedTypes.contains) {
-            return nil
-        }
+        let hasSensitiveMarker = pasteboard.types?.contains(where: sensitiveMarkerTypes.contains) ?? false
         let sourceApp = NSWorkspace.shared.frontmostApplication
         let sourceIsPM = isPasswordManagerSource(sourceApp?.bundleIdentifier)
+        let isKnownSensitiveSource = hasSensitiveMarker || sourceIsPM
 
         if let image = NSImage(pasteboard: pasteboard),
            let data = image.tiffRepresentation {
@@ -627,7 +680,7 @@ enum PasteboardSerializer {
                 contentHash: hash(data),
                 sourceAppBundleId: sourceApp?.bundleIdentifier,
                 sourceAppName: sourceApp?.localizedName,
-                isSensitive: sourceIsPM,
+                isSensitive: isKnownSensitiveSource,
                 sizeBytes: data.count
             )
         }
@@ -642,7 +695,7 @@ enum PasteboardSerializer {
                 contentHash: hash(data),
                 sourceAppBundleId: sourceApp?.bundleIdentifier,
                 sourceAppName: sourceApp?.localizedName,
-                isSensitive: sourceIsPM,
+                isSensitive: isKnownSensitiveSource,
                 sizeBytes: data.count
             )
         }
@@ -656,7 +709,7 @@ enum PasteboardSerializer {
                 contentHash: hash(data),
                 sourceAppBundleId: sourceApp?.bundleIdentifier,
                 sourceAppName: sourceApp?.localizedName,
-                isSensitive: sourceIsPM || SensitiveContentDetector.looksSensitive(html),
+                isSensitive: isKnownSensitiveSource || SensitiveContentDetector.looksSensitive(html),
                 sizeBytes: data.count
             )
         }
@@ -671,7 +724,7 @@ enum PasteboardSerializer {
                 contentHash: hash(data),
                 sourceAppBundleId: sourceApp?.bundleIdentifier,
                 sourceAppName: sourceApp?.localizedName,
-                isSensitive: sourceIsPM || SensitiveContentDetector.looksSensitive(text),
+                isSensitive: isKnownSensitiveSource || SensitiveContentDetector.looksSensitive(text),
                 sizeBytes: data.count
             )
         }
@@ -804,12 +857,14 @@ extension String {
 
 // MARK: - Global Hotkey
 
-final class GlobalShortcutManager {
+@MainActor
+final class GlobalShortcutManager: ObservableObject {
     static let shared = GlobalShortcutManager()
 
     private var hotKeyRef: EventHotKeyRef?
     private var eventHandlerRef: EventHandlerRef?
     private var isStarted = false
+    @Published private(set) var registrationStatus = ShortcutRegistrationStatus.notStarted(.default)
 
     private init() {}
 
@@ -848,13 +903,25 @@ final class GlobalShortcutManager {
     }
 
     func reload() {
+        register(ShortcutStore.shared.current)
+    }
+
+    @discardableResult
+    func register(_ spec: ShortcutSpec) -> ShortcutRegistrationStatus {
+        guard isStarted else {
+            registrationStatus = .notStarted(spec)
+            ShortcutStore.shared.markRegistrationStatus(registrationStatus)
+            return registrationStatus
+        }
+
+        let previouslyRegistered = hotKeyRef
         if let existing = hotKeyRef {
             UnregisterEventHotKey(existing)
             hotKeyRef = nil
         }
-        let spec = MainActor.assumeIsolated { ShortcutStore.shared.current }
+
         let hotKeyID = EventHotKeyID(signature: Self.hotKeySignature, id: Self.hotKeyID)
-        RegisterEventHotKey(
+        let registerStatus = RegisterEventHotKey(
             spec.keyCode,
             spec.carbonModifiers,
             hotKeyID,
@@ -862,6 +929,42 @@ final class GlobalShortcutManager {
             0,
             &hotKeyRef
         )
+
+        if registerStatus == noErr {
+            registrationStatus = .registered(spec)
+            ShortcutStore.shared.markRegistrationStatus(registrationStatus)
+            return registrationStatus
+        }
+
+        let failure = ShortcutRegistrationStatus.failed(spec, status: registerStatus)
+        hotKeyRef = nil
+        if reregisterCurrentShortcut(excluding: spec, wasRegistered: previouslyRegistered != nil) {
+            registrationStatus = .registered(ShortcutStore.shared.current)
+            ShortcutStore.shared.markRegistrationStatus(registrationStatus)
+        } else {
+            registrationStatus = failure
+            ShortcutStore.shared.markRegistrationStatus(failure)
+        }
+        return failure
+    }
+
+    private func reregisterCurrentShortcut(excluding failedSpec: ShortcutSpec, wasRegistered: Bool) -> Bool {
+        let current = ShortcutStore.shared.current
+        guard wasRegistered, current != failedSpec else { return false }
+        let hotKeyID = EventHotKeyID(signature: Self.hotKeySignature, id: Self.hotKeyID)
+        let restoreStatus = RegisterEventHotKey(
+            current.keyCode,
+            current.carbonModifiers,
+            hotKeyID,
+            GetApplicationEventTarget(),
+            0,
+            &hotKeyRef
+        )
+        if restoreStatus != noErr {
+            hotKeyRef = nil
+            return false
+        }
+        return true
     }
 
     deinit {
@@ -869,8 +972,8 @@ final class GlobalShortcutManager {
         if let eventHandlerRef { RemoveEventHandler(eventHandlerRef) }
     }
 
-    private static let hotKeySignature = OSType(UInt32(ascii: "McPV"))
-    private static let hotKeyID = UInt32(1)
+    private nonisolated static let hotKeySignature = OSType(0x4D635056) // "McPV"
+    private nonisolated static let hotKeyID = UInt32(1)
 }
 
 extension Notification.Name {

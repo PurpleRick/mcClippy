@@ -9,8 +9,8 @@ mcClippy stores clipboard history locally and should be treated as a sensitive-d
 - Capture fails closed if the key cannot be persisted.
 - Sensitive-looking content stores a placeholder preview instead of plaintext.
 - Sensitive content can be pasted while hidden.
-- Concealed/transient pasteboards are skipped.
-- Known password-manager pasteboard markers are skipped.
+- Concealed/transient pasteboards and known password-manager markers are treated as sensitive signals, not automatic skips.
+- Regular and pinned history both default to clearing once per Mac reboot, matching Windows clipboard history.
 - App exclusions let users skip capture while specific bundle IDs are frontmost.
 - Private mode pauses capture for a fixed duration.
 
@@ -30,6 +30,7 @@ The current detector flags common password/token markers and long token-like val
 - Verify no sensitive value is persisted in `plainTextPreview`.
 - Verify encrypted data survives relaunch.
 - Verify old plaintext sensitive previews are migrated to placeholders.
-- Verify password-manager pasteboards are skipped.
+- Verify password-manager and concealed-marker pasteboards are captured as masked sensitive rows when content is present.
+- Verify default reboot-scoped clearing removes persisted regular and pinned rows after a reboot.
 - Verify clear-history actions remove the intended records.
 - Verify a clean install shows onboarding and permission explanations.
