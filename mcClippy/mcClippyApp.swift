@@ -629,6 +629,8 @@ struct ClipboardSnapshot {
 enum PasteboardSerializer {
     static let sensitivePlaceholder = "Sensitive - hidden"
 
+    private static let imageTypes: [NSPasteboard.PasteboardType] = [.png, .tiff]
+
     private static let sensitiveMarkerTypes: [NSPasteboard.PasteboardType] = [
         NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"),
         NSPasteboard.PasteboardType("org.nspasteboard.TransientType"),
@@ -666,13 +668,14 @@ enum PasteboardSerializer {
     }
 
     static func snapshot(from pasteboard: NSPasteboard) -> ClipboardSnapshot? {
-        let hasSensitiveMarker = pasteboard.types?.contains(where: sensitiveMarkerTypes.contains) ?? false
+        let pasteboardTypes = pasteboard.types ?? []
+        let hasSensitiveMarker = pasteboardTypes.contains(where: sensitiveMarkerTypes.contains)
         let sourceApp = NSWorkspace.shared.frontmostApplication
         let sourceIsPM = isPasswordManagerSource(sourceApp?.bundleIdentifier)
         let isKnownSensitiveSource = hasSensitiveMarker || sourceIsPM
 
-        if let image = NSImage(pasteboard: pasteboard),
-           let data = image.tiffRepresentation {
+        if let imageType = imageTypes.first(where: pasteboardTypes.contains),
+           let data = pasteboard.data(forType: imageType) {
             return ClipboardSnapshot(
                 type: .image,
                 preview: "Image copied to clipboard",
@@ -810,14 +813,14 @@ enum SensitiveContentDetector {
         let markers = ["password", "passwd", "api_key", "apikey", "secret", "token", "bearer ", "private key"]
         if markers.contains(where: lowered.contains) { return true }
         // Stripe / OpenAI / generic provider keys
-        if trimmed.range(of: #"(?i)(sk|pk|rk)_[a-z0-9]{20,}"#, options: .regularExpression) != nil { return true }
+        if SensitiveRegexCache.providerKey.matches(trimmed) { return true }
         // GitHub PATs
-        if trimmed.range(of: #"gh[pousr]_[A-Za-z0-9]{20,}"#, options: .regularExpression) != nil { return true }
+        if SensitiveRegexCache.githubToken.matches(trimmed) { return true }
         // JWT-like (base64.base64.base64) with the `eyJ` header prefix
-        if trimmed.range(of: #"eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"#, options: .regularExpression) != nil { return true }
+        if SensitiveRegexCache.jwt.matches(trimmed) { return true }
         // Padded base64 of at least 24 chars (much tighter than before — plain URLs
         // and long single-line prose don't carry `=` padding).
-        if trimmed.range(of: #"^[A-Za-z0-9+/]{24,}={1,2}$"#, options: .regularExpression) != nil { return true }
+        if SensitiveRegexCache.paddedBase64.matches(trimmed) { return true }
         // Random-looking password: short string, no whitespace, mixed character classes.
         if looksLikePassword(trimmed) { return true }
         return false
@@ -842,17 +845,57 @@ enum SensitiveContentDetector {
     }
 }
 
+private enum SensitiveRegexCache {
+    static let providerKey = try! NSRegularExpression(pattern: #"(sk|pk|rk)_[a-z0-9]{20,}"#, options: [.caseInsensitive])
+    static let githubToken = try! NSRegularExpression(pattern: #"gh[pousr]_[A-Za-z0-9]{20,}"#)
+    static let jwt = try! NSRegularExpression(pattern: #"eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"#)
+    static let paddedBase64 = try! NSRegularExpression(pattern: #"^[A-Za-z0-9+/]{24,}={1,2}$"#)
+}
+
+private extension NSRegularExpression {
+    func matches(_ value: String) -> Bool {
+        firstMatch(in: value, range: NSRange(value.startIndex..., in: value)) != nil
+    }
+}
+
 extension String {
     var truncatedPreview: String {
-        let condensed = replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let condensed = collapsingWhitespace.trimmingCharacters(in: .whitespacesAndNewlines)
         guard condensed.count > 180 else { return condensed }
         return String(condensed.prefix(180)) + "..."
     }
 
     var strippingTags: String {
-        replacingOccurrences(of: #"<[^>]+>"#, with: " ", options: .regularExpression)
+        RegexCache.htmlTags.stringByReplacingMatches(
+            in: self,
+            range: NSRange(startIndex..., in: self),
+            withTemplate: " "
+        )
     }
+
+    private var collapsingWhitespace: String {
+        var result = String()
+        result.reserveCapacity(count)
+        var previousWasWhitespace = false
+
+        for character in self {
+            if character.isWhitespace || character.isNewline {
+                if !previousWasWhitespace {
+                    result.append(" ")
+                    previousWasWhitespace = true
+                }
+            } else {
+                result.append(character)
+                previousWasWhitespace = false
+            }
+        }
+
+        return result
+    }
+}
+
+private enum RegexCache {
+    static let htmlTags = try! NSRegularExpression(pattern: #"<[^>]+>"#)
 }
 
 // MARK: - Global Hotkey

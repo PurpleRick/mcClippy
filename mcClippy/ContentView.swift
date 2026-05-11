@@ -4,6 +4,7 @@
 //
 
 import AppKit
+import ImageIO
 import SwiftData
 import SwiftUI
 
@@ -371,9 +372,7 @@ private struct ClipboardRow: View {
 
     @ViewBuilder
     private var thumbnail: some View {
-        if item.type == .image,
-           let data = PasteboardSerializer.decodedData(for: item),
-           let image = NSImage(data: data) {
+        if let image = ImageThumbnailCache.shared.thumbnail(for: item) {
             Image(nsImage: image)
                 .resizable()
                 .scaledToFill()
@@ -421,6 +420,39 @@ private struct ClipboardRow: View {
             .accessibilityLabel("More actions")
         }
         .foregroundStyle(.secondary)
+    }
+}
+
+@MainActor
+private final class ImageThumbnailCache {
+    static let shared = ImageThumbnailCache()
+
+    private let cache = NSCache<NSString, NSImage>()
+
+    private init() {
+        cache.countLimit = 80
+        cache.totalCostLimit = 8 * 1024 * 1024
+    }
+
+    func thumbnail(for item: Item) -> NSImage? {
+        guard item.type == .image else { return nil }
+
+        let key = NSString(string: item.contentHash)
+        if let cached = cache.object(forKey: key) { return cached }
+
+        guard let data = PasteboardSerializer.decodedData(for: item),
+              let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                  kCGImageSourceCreateThumbnailFromImageAlways: true,
+                  kCGImageSourceThumbnailMaxPixelSize: 96,
+                  kCGImageSourceCreateThumbnailWithTransform: true,
+              ] as CFDictionary) else {
+            return nil
+        }
+
+        let image = NSImage(cgImage: cgImage, size: NSSize(width: 38, height: 38))
+        cache.setObject(image, forKey: key, cost: cgImage.bytesPerRow * cgImage.height)
+        return image
     }
 }
 
