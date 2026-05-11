@@ -46,17 +46,24 @@ enum AutoPaster {
     /// ensuring the clipboard already holds the desired content.
     @discardableResult
     static func paste(into targetApp: NSRunningApplication?) -> Bool {
-        guard AccessibilityHelper.isTrusted() else { return false }
-        targetApp?.activate(options: [])
+        guard AccessibilityHelper.isTrusted() else {
+            AccessibilityHelper.requestAccess()
+            return false
+        }
 
-        // Give the activation a brief moment before posting the key.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-            postCommandV()
+        let pid = targetApp?.processIdentifier
+        targetApp?.activate(options: [.activateAllWindows])
+
+        // Give AppKit a moment to close the panel and restore focus. Posting to
+        // the target PID avoids dropping Cmd+V when our menu-bar panel still owns
+        // key focus for a few milliseconds.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
+            postCommandV(to: pid)
         }
         return true
     }
 
-    private static func postCommandV() {
+    private static func postCommandV(to pid: pid_t?) {
         let source = CGEventSource(stateID: .combinedSessionState)
         let key = CGKeyCode(kVK_ANSI_V)
         guard let down = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: true),
@@ -65,7 +72,13 @@ enum AutoPaster {
         }
         down.flags = .maskCommand
         up.flags = .maskCommand
-        down.post(tap: .cgAnnotatedSessionEventTap)
-        up.post(tap: .cgAnnotatedSessionEventTap)
+
+        if let pid, pid > 0 {
+            down.postToPid(pid)
+            up.postToPid(pid)
+        } else {
+            down.post(tap: .cgAnnotatedSessionEventTap)
+            up.post(tap: .cgAnnotatedSessionEventTap)
+        }
     }
 }
