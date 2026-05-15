@@ -223,6 +223,7 @@ private struct GeneralSettingsView: View {
 private struct ExclusionsSettingsView: View {
     @ObservedObject private var store = AppExclusionStore.shared
     @State private var newBundleID = ""
+    @State private var addError: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -247,14 +248,27 @@ private struct ExclusionsSettingsView: View {
             HStack {
                 Button("Exclude Frontmost App") { store.excludeFrontmost() }
                 Spacer()
-                TextField("bundle.id", text: $newBundleID)
+                TextField("com.example.app", text: $newBundleID)
                     .textFieldStyle(.roundedBorder)
-                    .frame(width: 180)
+                    .frame(width: 200)
                 Button("Add") {
-                    store.add(newBundleID)
-                    newBundleID = ""
+                    let trimmed = newBundleID.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if store.add(trimmed) {
+                        newBundleID = ""
+                        addError = nil
+                    } else if !AppExclusionStore.isValidBundleID(trimmed) {
+                        addError = "Not a valid bundle ID. Use reverse DNS, e.g. com.example.app"
+                    } else {
+                        addError = "Already excluded."
+                    }
                 }
                 .disabled(newBundleID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+
+            if let addError {
+                Text(addError)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
             }
 
             Divider()
@@ -268,6 +282,7 @@ private struct ExclusionsSettingsView: View {
 private struct HistoryClearControls: View {
     @Environment(\.modelContext) private var modelContext
     @Query private var items: [Item]
+    @State private var showClearAllConfirmation = false
 
     var body: some View {
         HStack {
@@ -286,10 +301,22 @@ private struct HistoryClearControls: View {
             }
 
             Button("Clear All", role: .destructive) {
-                for item in items {
-                    modelContext.delete(item)
+                showClearAllConfirmation = true
+            }
+            .confirmationDialog(
+                "Clear all clipboard history?",
+                isPresented: $showClearAllConfirmation,
+                titleVisibility: .visible
+            ) {
+                Button("Clear All Items", role: .destructive) {
+                    for item in items {
+                        modelContext.delete(item)
+                    }
+                    try? modelContext.save()
                 }
-                try? modelContext.save()
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This permanently removes every item, including pinned items. This cannot be undone.")
             }
         }
         .controlSize(.small)
@@ -297,16 +324,32 @@ private struct HistoryClearControls: View {
 }
 
 private struct AboutSettingsView: View {
+    private var versionString: String {
+        let info = Bundle.main.infoDictionary ?? [:]
+        let short = info["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info["CFBundleVersion"] as? String ?? "0"
+        return "Version \(short) (build \(build))"
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("mcClippy").font(.title2.weight(.semibold))
             Text("Local-first clipboard history for macOS.")
                 .foregroundStyle(.secondary)
+            Text(versionString)
+                .font(.caption)
+                .foregroundStyle(.secondary)
             Divider()
             Label("History encrypted at rest (ChaChaPoly + Keychain).", systemImage: "lock.shield")
+            Label("On-device OCR for images (Apple Vision, no network).", systemImage: "doc.text.viewfinder")
             Label("Password-like items are captured but masked by default.", systemImage: "key")
             Label("Sensitive previews are blurred until you reveal them.", systemImage: "eye.slash")
             Spacer()
+            HStack(spacing: 12) {
+                Link("Source on GitHub", destination: URL(string: "https://github.com/PurpleRick/mcClippy")!)
+                Link("Releases", destination: URL(string: "https://github.com/PurpleRick/mcClippy/releases")!)
+            }
+            .font(.caption)
         }
         .padding()
         .frame(maxWidth: .infinity, alignment: .leading)

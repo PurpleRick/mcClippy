@@ -177,14 +177,57 @@ struct mcClippyTests {
 
     @MainActor
     @Test func appExclusionsCanAddAndRemoveBundleID() {
-        let id = "test.mcClippy.exclusion.\(UUID().uuidString)"
+        let id = "test.mcClippy.exclusion.\(UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: ""))"
         let store = AppExclusionStore.shared
 
-        store.add(id)
+        #expect(store.add(id))
         #expect(store.isExcluded(id))
 
         store.remove(id)
         #expect(!store.isExcluded(id))
+    }
+
+    @Test func bundleIDValidationAcceptsReverseDNS() {
+        #expect(AppExclusionStore.isValidBundleID("com.apple.Safari"))
+        #expect(AppExclusionStore.isValidBundleID("makmaj.mcClippy"))
+        #expect(AppExclusionStore.isValidBundleID("io.github.purplerick.mcClippy"))
+        #expect(AppExclusionStore.isValidBundleID("com.1password.1password"))
+    }
+
+    @Test func bundleIDValidationRejectsNonsense() {
+        #expect(!AppExclusionStore.isValidBundleID(""))
+        #expect(!AppExclusionStore.isValidBundleID("banana"))
+        #expect(!AppExclusionStore.isValidBundleID("hello world"))
+        #expect(!AppExclusionStore.isValidBundleID(".com.apple.Safari"))
+        #expect(!AppExclusionStore.isValidBundleID("com.apple.Safari."))
+        #expect(!AppExclusionStore.isValidBundleID("123.456.789"))
+    }
+
+    @MainActor
+    @Test func addReturnsFalseForInvalidBundleID() {
+        let store = AppExclusionStore.shared
+        let originalCount = store.bundleIDs.count
+        #expect(!store.add("not a bundle id"))
+        #expect(!store.add(""))
+        #expect(store.bundleIDs.count == originalCount)
+    }
+
+    @MainActor
+    @Test func maxItemSizeMegabytesRoundsAndRoundTrips() {
+        let settings = HistorySettings.shared
+        let original = settings.maxItemSizeBytes
+        defer { settings.maxItemSizeBytes = original }
+
+        // Whole-MB values round-trip exactly.
+        settings.maxItemSizeBytes = 5 * 1_048_576
+        #expect(settings.maxItemSizeMegabytes == 5)
+        settings.maxItemSizeMegabytes = 10
+        #expect(settings.maxItemSizeBytes == 10 * 1_048_576)
+
+        // Non-MB-aligned bytes round to nearest MB instead of truncating.
+        // 5.5 MB = 5,767,168 bytes → rounds to 6 MB
+        settings.maxItemSizeBytes = 5_767_168
+        #expect(settings.maxItemSizeMegabytes == 6)
     }
 
     @MainActor

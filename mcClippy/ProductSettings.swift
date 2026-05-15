@@ -124,7 +124,10 @@ final class HistorySettings: ObservableObject {
     }
 
     var maxItemSizeMegabytes: Int {
-        get { maxItemSizeBytes / 1_048_576 }
+        // Round to the nearest MB so a non-MB-aligned byte count (e.g. from
+        // a manual `defaults write` or a legacy store) round-trips through
+        // the stepper without silently truncating chunks of allowed size.
+        get { (maxItemSizeBytes + 524_288) / 1_048_576 }
         set { maxItemSizeBytes = newValue * 1_048_576 }
     }
 

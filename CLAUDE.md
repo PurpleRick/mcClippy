@@ -39,11 +39,11 @@ SourceKit's index frequently shows stale "Cannot find type 'Item' in scope" diag
 Tag-driven via GitHub Actions (`.github/workflows/release.yml`):
 
 ```bash
-git tag v1.0.x
-git push origin v1.0.x
+git tag v1.1.x
+git push origin v1.1.x
 ```
 
-The workflow builds Release, ad-hoc signs, packages a zip + sha256, and publishes to GitHub Releases. The yml has commented-out stubs for switching to Developer ID + notarytool when an Apple Developer cert is available.
+The workflow builds Release, ad-hoc signs, packages a zip + sha256, and publishes to GitHub Releases. The yml has commented-out stubs for switching to Developer ID + `notarytool` when an Apple Developer cert is available. `PrivacyInfo.xcprivacy` is bundled into `Contents/Resources/` automatically via the synchronized file group.
 
 ## Architecture — the parts that span files
 
@@ -82,15 +82,21 @@ Anything that needs the original bytes — restore to clipboard, image thumbnail
 
 ### SwiftData model migration
 
-`Item.isEncrypted` was added with a default value (`false`) so lightweight migration handles old stores. `PasteboardMonitor.start()` runs `sanitizeSensitivePreviews` once per launch to scrub any legacy plaintext previews on items flagged sensitive. Don't remove that sweep.
+New `Item` properties (`isEncrypted`, `ocrText`, `ocrCompletedAt`) are all added with default values so SwiftData's lightweight migration handles old stores. `PasteboardMonitor.start()` runs `sanitizeSensitivePreviews` once per launch to scrub any legacy plaintext previews on items flagged sensitive. Don't remove that sweep.
+
+### OCR
+
+`OCRService.shared` is an actor that wraps `VNRecognizeTextRequest`. Triggered on demand from `ContentView.pasteAsText(_:)` when the user picks "Paste as Text" on an image row. Concurrency capped at 2 via `ConcurrencyPermitter`. Dedups by `Item.id` so the same image isn't extracted twice. Decodes through `PasteboardSerializer.decodedData(for:)` (same centralized path as everything else), downsamples to 4096 px before Vision, and writes the result back to the `Item` on `@MainActor`. After write, the OCR text is run through `SensitiveContentDetector.looksSensitive` and flips `isSensitive` if it hits. **Don't add an eager capture-time OCR path** — it was rejected for battery reasons.
 
 ### Shortcut handling
 
-Global hotkey is a Carbon `EventHotKey` (not SwiftUI `KeyboardShortcut`). `GlobalShortcutManager.reload()` unregisters and re-registers whenever `ShortcutStore.current` changes. `ShortcutSpec` is `Codable` and persisted in `UserDefaults`. `ShortcutRecorderView` uses a local `NSEvent` monitor with both an Esc-cancel and a `didResignKey` escape hatch — if you change the recorder, keep both.
+Global hotkey is a Carbon `EventHotKey` (not SwiftUI `KeyboardShortcut`). `GlobalShortcutManager.reload()` unregisters and re-registers whenever `ShortcutStore.current` changes. The manager also re-registers on `NSWorkspace.didWakeNotification` and `NSWorkspace.sessionDidBecomeActiveNotification` — Carbon hot keys silently stop dispatching after long sleep/wake cycles or `loginwindow` re-spawns, and re-arming via these is the fix. `ShortcutSpec` is `Codable` and persisted in `UserDefaults`. `ShortcutRecorderView` uses a local `NSEvent` monitor with both an Esc-cancel and a `didResignKey` escape hatch — if you change the recorder, keep both.
 
 ### Auto-paste
 
-`AutoPaster.paste(into:)` activates the previously frontmost app then posts a `cgAnnotatedSessionEventTap` `CGEvent` for `⌘V`. Requires Accessibility trust (`AXIsProcessTrusted`) and **the App Sandbox to be disabled** — `ENABLE_APP_SANDBOX = NO` is set in both Debug and Release. Sandbox-on builds will silently no-op auto-paste even with Accessibility granted.
+`AutoPaster.paste(into:)` activates the previously frontmost app, polls for `target.isActive` (up to ~400 ms / 8 × 50 ms retries) before posting a `CGEvent` for `⌘V` through `.cghidEventTap`. The HID tap is more reliable than the annotated session tap across Electron/Chromium destinations. Requires Accessibility trust (`AXIsProcessTrusted`).
+
+The current build sets `ENABLE_APP_SANDBOX = NO` for direct distribution because there's no need for the sandbox-specific TCC dance when we're not going through the Mac App Store. A sandboxed MAS build *can* post `CGEvent`s — Apple exposes a dedicated `kTCCServicePostEvent` privilege (separate from full Accessibility) that permits `CGEvent.post(...)` under sandbox. This is what Maccy, Paste, Pastebot, and Flycut all do on the App Store. So the planned v1.2.0 MAS target keeps the same `AutoPaster` code; only the entitlements file differs.
 
 ## Conventions worth keeping
 

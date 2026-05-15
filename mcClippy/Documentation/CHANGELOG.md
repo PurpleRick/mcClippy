@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.1.1
+
+- Bundle ID validation: the Exclusions tab now rejects malformed entries (`banana`, `hello.world`) with an inline error and only accepts reverse-DNS-shaped strings.
+- "Exclude Frontmost App" no longer adds mcClippy to its own exclusion list when invoked from the menu bar or Settings.
+- "Clear All" in the Exclusions tab now asks for confirmation — it wipes pinned items too, and the previous behavior had no undo path.
+- About panel now shows the version and build number, plus links to the GitHub project and Releases page.
+- Fixed a latent silent-data-loss in the Maximum Item Size stepper: integer division previously truncated non-MB-aligned byte counts. The displayed MB value now rounds to nearest, so a 5.5 MB stored value shows as 6 MB instead of silently snapping to 5.
+
 ## 1.1.0
 
 - Added on-demand text extraction from images: right-click any image item and choose **Paste as Text** to OCR it via Apple's Vision framework. Runs locally on this Mac — no network, no entitlement. Extracted text is cached on the item, so the second time is instant.
