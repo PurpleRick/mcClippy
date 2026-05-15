@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 1.1.0
+
+- Added on-demand text extraction from images: right-click any image item and choose **Paste as Text** to OCR it via Apple's Vision framework. Runs locally on this Mac — no network, no entitlement. Extracted text is cached on the item, so the second time is instant.
+- Extracted text becomes searchable: typing in the panel search box now matches OCR'd content from screenshots and image clipboard items.
+- A spinner appears on the row's thumbnail while extraction is in progress.
+- OCR'd text is run through the sensitive-content detector, so screenshots of password managers, `.env` files, or 2FA codes get the same masking treatment as text captures.
+- Added a Settings toggle to disable the feature (under General → Text Extraction).
+- Menu-bar "Pause Monitoring" / "Private Mode" labels now reflect the actual current state ("Resume Monitoring" / "Private Mode (Active)") instead of being static.
+- Destructive clear actions in the menu and Exclusions panel now explicitly save the model context (no longer rely on autosave).
+
+## 1.0.3
+
+- Fixed the global shortcut becoming unresponsive after the Mac sleeps and wakes — the Carbon hotkey now re-registers on wake and session-active notifications.
+- Improved auto-paste reliability: waits for the target app to actually become frontmost (up to ~400 ms) before posting ⌘V, and switched to the HID event tap which is more reliable across destination apps.
+- Always restores focus to the previously-active app on paste, even when auto-paste is disabled or fails.
+- Fixed a race condition where the floating panel could leak keyboard event monitors when dismissed by clicking outside the panel.
+- Fixed a crash in the Settings panel when changing the "Keep up to N items" or "Maximum item size" sliders — the clamping logic ran into infinite recursion via the `@Published didSet`.
+
 ## 1.0.2
 
 - Fixed Enter/select auto-paste reliability by posting Command+V back to the target app.

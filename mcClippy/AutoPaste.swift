@@ -42,28 +42,34 @@ enum AccessibilityHelper {
 }
 
 enum AutoPaster {
-    /// Activate `targetApp` then post ⌘V to the system. Caller is responsible for
-    /// ensuring the clipboard already holds the desired content.
+    /// Activate `targetApp` then post ⌘V once the target is frontmost.
+    /// Returns false if Accessibility is missing or the target is nil/terminated.
+    /// Returning true means we scheduled the keystroke after the target became
+    /// active (or hit the ~400 ms cap) — not that the keystroke necessarily landed.
     @discardableResult
     static func paste(into targetApp: NSRunningApplication?) -> Bool {
         guard AccessibilityHelper.isTrusted() else {
             AccessibilityHelper.requestAccess()
             return false
         }
+        guard let target = targetApp, !target.isTerminated else { return false }
 
-        let pid = targetApp?.processIdentifier
-        targetApp?.activate(options: [.activateAllWindows])
-
-        // Give AppKit a moment to close the panel and restore focus. Posting to
-        // the target PID avoids dropping Cmd+V when our menu-bar panel still owns
-        // key focus for a few milliseconds.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
-            postCommandV(to: pid)
-        }
+        target.activate(options: [.activateAllWindows])
+        attemptPaste(target: target, retriesRemaining: 8)
         return true
     }
 
-    private static func postCommandV(to pid: pid_t?) {
+    private static func attemptPaste(target: NSRunningApplication, retriesRemaining: Int) {
+        if target.isActive || retriesRemaining == 0 {
+            postCommandV()
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            attemptPaste(target: target, retriesRemaining: retriesRemaining - 1)
+        }
+    }
+
+    private static func postCommandV() {
         let source = CGEventSource(stateID: .combinedSessionState)
         let key = CGKeyCode(kVK_ANSI_V)
         guard let down = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: true),
@@ -72,13 +78,9 @@ enum AutoPaster {
         }
         down.flags = .maskCommand
         up.flags = .maskCommand
-
-        if let pid, pid > 0 {
-            down.postToPid(pid)
-            up.postToPid(pid)
-        } else {
-            down.post(tap: .cgAnnotatedSessionEventTap)
-            up.post(tap: .cgAnnotatedSessionEventTap)
-        }
+        // HID-level tap is the most reliable across destination apps; some
+        // Electron/Chromium apps drop events posted to the annotated session tap.
+        down.post(tap: .cghidEventTap)
+        up.post(tap: .cghidEventTap)
     }
 }

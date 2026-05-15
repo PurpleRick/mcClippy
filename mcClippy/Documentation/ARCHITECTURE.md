@@ -36,8 +36,17 @@ mcClippy is a local-first macOS menu bar clipboard history app. The app intentio
 4. User presses Return or clicks a row.
 5. `PasteboardSerializer.restore` decrypts and writes the selected content to `NSPasteboard.general`.
 6. The panel closes.
-7. If enabled and Accessibility is trusted, `AutoPaster` activates the previous app and posts Cmd+V.
-8. If Accessibility is not trusted, mcClippy still returns focus to the previous app with the selected item on the clipboard.
+7. Focus is returned to the previously-active app unconditionally, so the user always lands back where they were.
+8. If enabled and Accessibility is trusted, `AutoPaster` polls for the target app's `isActive` (up to ~400 ms / 8 × 50 ms retries) and then posts Cmd+V via the HID event tap (`.cghidEventTap`). The HID tap is more reliable across destination apps than the session tap, which some Electron/Chromium apps silently drop.
+
+## Shortcut Manager Wake/Session Resilience
+
+`GlobalShortcutManager` registers a Carbon `EventHotKey` once on app launch. Carbon hot keys are known to silently stop dispatching after the Mac sleeps and wakes for an extended period, or after a `loginwindow` re-spawn of WindowServer. To recover automatically the manager observes two `NSWorkspace` notifications and calls `reload()` (which unregisters and re-registers the hot key) on each:
+
+- `NSWorkspace.didWakeNotification` — fired on wake from sleep.
+- `NSWorkspace.sessionDidBecomeActiveNotification` — fired when the user's login session becomes active (fast user switching, screen unlock after long lock).
+
+Without this, the symptom is "the global shortcut stops opening the panel after the Mac has been on for several days, and quitting + relaunching the app fixes it."
 
 ## Privacy Constraints
 

@@ -61,6 +61,12 @@ final class Item {
     var isSensitive: Bool
     var sizeBytes: Int
     var isEncrypted: Bool = false
+    // OCR fields. nil ocrCompletedAt means OCR has never been attempted
+    // for this item; an empty ocrText with non-nil ocrCompletedAt means
+    // OCR ran and found no text. New fields with defaults trigger
+    // SwiftData lightweight migration automatically.
+    var ocrText: String? = nil
+    var ocrCompletedAt: Date? = nil
 
     var type: ClipboardItemKind {
         get {
@@ -84,7 +90,9 @@ final class Item {
         isPinned: Bool = false,
         isSensitive: Bool = false,
         sizeBytes: Int,
-        isEncrypted: Bool = false
+        isEncrypted: Bool = false,
+        ocrText: String? = nil,
+        ocrCompletedAt: Date? = nil
     ) {
         self.id = id
         self.typeRawValue = type.rawValue
@@ -99,5 +107,7 @@ final class Item {
         self.isSensitive = isSensitive
         self.sizeBytes = sizeBytes
         self.isEncrypted = isEncrypted
+        self.ocrText = ocrText
+        self.ocrCompletedAt = ocrCompletedAt
     }
 }

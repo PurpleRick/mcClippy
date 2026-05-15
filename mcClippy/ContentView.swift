@@ -53,6 +53,7 @@ struct ContentView: View {
     @State private var selectedID: UUID?
     @State private var hoveredID: UUID?
     @State private var revealedSensitiveItemIDs = Set<UUID>()
+    @State private var ocrInFlight: Set<UUID> = []
     @FocusState private var searchFocused: Bool
 
     private var filteredItems: [Item] {
@@ -62,6 +63,7 @@ struct ContentView: View {
                 guard !searchText.isEmpty else { return true }
                 return item.plainTextPreview.localizedCaseInsensitiveContains(searchText)
                     || (item.sourceAppName?.localizedCaseInsensitiveContains(searchText) ?? false)
+                    || (item.ocrText?.localizedCaseInsensitiveContains(searchText) ?? false)
             }
             .sorted { a, b in
                 if a.isPinned != b.isPinned { return a.isPinned && !b.isPinned }
@@ -157,6 +159,7 @@ struct ContentView: View {
                             isSelected: selectedID == item.id,
                             isHovered: hoveredID == item.id,
                             isSensitiveRevealed: revealedSensitiveItemIDs.contains(item.id),
+                            isOCRRunning: ocrInFlight.contains(item.id),
                             onTap: {
                                 selectedID = item.id
                                 paste(item)
@@ -165,7 +168,7 @@ struct ContentView: View {
                                 hoveredID = hovering ? item.id : (hoveredID == item.id ? nil : hoveredID)
                             },
                             togglePin: { item.isPinned.toggle() },
-                            pasteAsText: { paste(item, asPlainText: true) },
+                            pasteAsText: { pasteAsText(item) },
                             delete: {
                                 modelContext.delete(item)
                                 if selectedID == item.id { selectedID = filteredItems.first?.id }
@@ -229,15 +232,62 @@ struct ContentView: View {
         let candidate = PasteHistoryPanelController.shared.previousFrontmostApp
         let previousApp: NSRunningApplication? = (candidate?.isTerminated == false) ? candidate : nil
         panelClose()
+        // Always restore focus to the previous app so the user lands back where
+        // they were, even when auto-paste is disabled or fails.
+        previousApp?.activate(options: [])
         if AutoPasteSettings.shared.isEnabled {
-            if !AutoPaster.paste(into: previousApp) {
-                previousApp?.activate(options: [])
-            }
+            AutoPaster.paste(into: previousApp)
         }
     }
 
     private func recencyDate(for item: Item) -> Date {
         item.lastUsedAt ?? item.createdAt
+    }
+
+    /// Paste-as-text for any item. Non-image items use the existing plain-text
+    /// restore path. Image items use cached OCR text if available, otherwise
+    /// kick off Vision and paste once extraction completes.
+    private func pasteAsText(_ item: Item) {
+        if item.type != .image {
+            paste(item, asPlainText: true)
+            return
+        }
+        if let cached = item.ocrText, !cached.isEmpty {
+            paste(item, asPlainText: true)
+            return
+        }
+        if item.ocrCompletedAt != nil {
+            // Already attempted, nothing found.
+            panelClose()
+            return
+        }
+
+        ocrInFlight.insert(item.id)
+        let itemID = item.id
+        Task { @MainActor in
+            defer { ocrInFlight.remove(itemID) }
+            guard let data = PasteboardSerializer.decodedData(for: item) else {
+                panelClose()
+                return
+            }
+            let extracted = await OCRService.shared.extract(itemID: itemID, data: data) ?? ""
+            item.ocrText = extracted
+            item.ocrCompletedAt = Date()
+            // Mirror the capture-time policy: flag images whose OCR text looks
+            // sensitive so screenshots of password manager UIs / .env files
+            // get the same blur + placeholder treatment.
+            if !extracted.isEmpty, SensitiveContentDetector.looksSensitive(extracted) {
+                item.isSensitive = true
+                item.plainTextPreview = PasteboardSerializer.sensitivePlaceholder
+            }
+            try? modelContext.save()
+
+            if !extracted.isEmpty {
+                paste(item, asPlainText: true)
+            } else {
+                panelClose()
+            }
+        }
     }
 }
 
@@ -273,6 +323,7 @@ private struct ClipboardRow: View {
     let isSelected: Bool
     let isHovered: Bool
     let isSensitiveRevealed: Bool
+    let isOCRRunning: Bool
     let onTap: () -> Void
     let onHover: (Bool) -> Void
     let togglePin: () -> Void
@@ -280,6 +331,11 @@ private struct ClipboardRow: View {
     let delete: () -> Void
     let toggleSensitive: () -> Void
 
+    @ObservedObject private var ocrSettings = OCRSettings.shared
+
+    private var canPasteAsText: Bool {
+        item.type != .image || ocrSettings.isEnabled
+    }
     private var shouldMaskPreview: Bool { item.isSensitive && !isSensitiveRevealed }
     private var displayPreview: String {
         PasteboardSerializer.displayPreview(for: item, revealingSensitive: isSensitiveRevealed)
@@ -359,7 +415,10 @@ private struct ClipboardRow: View {
         .onHover(perform: onHover)
         .contextMenu {
             Button(item.isPinned ? "Unpin" : "Pin", systemImage: item.isPinned ? "pin.slash" : "pin", action: togglePin)
-            Button("Paste as Text", systemImage: "textformat", action: pasteAsText)
+            if canPasteAsText {
+                Button(pasteAsTextLabel, systemImage: "textformat", action: pasteAsText)
+                    .disabled(isOCRRunning)
+            }
             if item.isSensitive {
                 Button(isSensitiveRevealed ? "Hide Preview" : "Reveal Preview",
                        systemImage: isSensitiveRevealed ? "eye.slash" : "eye",
@@ -370,20 +429,37 @@ private struct ClipboardRow: View {
         }
     }
 
+    private var pasteAsTextLabel: String {
+        guard item.type == .image else { return "Paste as Text" }
+        if isOCRRunning { return "Extracting Text…" }
+        if let text = item.ocrText, !text.isEmpty { return "Paste as Text" }
+        if item.ocrCompletedAt != nil { return "No Text Found" }
+        return "Extract & Paste as Text"
+    }
+
     @ViewBuilder
     private var thumbnail: some View {
-        if let image = ImageThumbnailCache.shared.thumbnail(for: item) {
-            Image(nsImage: image)
-                .resizable()
-                .scaledToFill()
-                .frame(width: 38, height: 38)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-        } else {
-            Image(systemName: item.type.systemImageName)
-                .font(.system(size: 14))
-                .foregroundStyle(.secondary)
-                .frame(width: 38, height: 38)
-                .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+        ZStack {
+            if let image = ImageThumbnailCache.shared.thumbnail(for: item) {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: 38, height: 38)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+            } else {
+                Image(systemName: item.type.systemImageName)
+                    .font(.system(size: 14))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 38, height: 38)
+                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+            }
+            if isOCRRunning {
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(.regularMaterial)
+                    .frame(width: 38, height: 38)
+                ProgressView()
+                    .controlSize(.small)
+            }
         }
     }
 

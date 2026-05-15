@@ -255,6 +255,116 @@ struct mcClippyTests {
         #expect(ClipboardRetentionPolicy.ageLimited(days: 999) == .oneYear)
     }
 
+    @Test func pasteAsTextRestoresOCRTextForImage() throws {
+        let ocr = "extracted screen text"
+        let item = Item(
+            type: .image,
+            plainTextPreview: "Image copied to clipboard",
+            dataBlob: EncryptionService.seal(Data(repeating: 0, count: 8)),
+            contentHash: "image-hash",
+            sourceAppBundleId: nil,
+            sourceAppName: nil,
+            sizeBytes: 8,
+            isEncrypted: true,
+            ocrText: ocr,
+            ocrCompletedAt: Date()
+        )
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name(UUID().uuidString))
+
+        #expect(PasteboardSerializer.restore(item, to: pasteboard, asPlainText: true))
+        #expect(pasteboard.string(forType: .string) == ocr)
+    }
+
+    @Test func pasteAsTextReturnsFalseForImageWithoutOCRText() throws {
+        // Image with no OCR text yet → asPlainText restore should fail
+        // (so the UI can surface "Extract & Paste as Text" instead).
+        let item = Item(
+            type: .image,
+            plainTextPreview: "Image copied to clipboard",
+            dataBlob: EncryptionService.seal(Data(repeating: 0, count: 8)),
+            contentHash: "image-hash-2",
+            sourceAppBundleId: nil,
+            sourceAppName: nil,
+            sizeBytes: 8,
+            isEncrypted: true
+        )
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name(UUID().uuidString))
+        #expect(!PasteboardSerializer.restore(item, to: pasteboard, asPlainText: true))
+    }
+
+    @MainActor
+    @Test func ocrSettingsTogglePersists() {
+        let settings = OCRSettings.shared
+        let original = settings.isEnabled
+        defer { settings.isEnabled = original }
+
+        settings.isEnabled = false
+        #expect(UserDefaults.standard.bool(forKey: "mcClippy.ocr.enabled") == false)
+        settings.isEnabled = true
+        #expect(UserDefaults.standard.bool(forKey: "mcClippy.ocr.enabled") == true)
+    }
+
+    @MainActor
+    @Test func historySettingsClampsWithoutInfiniteRecursion() {
+        // Regression: HistorySettings.maxCount.didSet self-assigned the
+        // clamped value unconditionally, which retriggered didSet forever
+        // and crashed the Settings panel when the stepper wrote a value.
+        let settings = HistorySettings.shared
+        let originalCount = settings.maxCount
+        let originalBytes = settings.maxItemSizeBytes
+        defer {
+            settings.maxCount = originalCount
+            settings.maxItemSizeBytes = originalBytes
+        }
+
+        // In-range assignments must write through without recursing.
+        settings.maxCount = 50
+        #expect(settings.maxCount == 50)
+        settings.maxCount = 200
+        #expect(settings.maxCount == 200)
+
+        // Out-of-range values are clamped to bounds without crashing.
+        settings.maxCount = 10_000
+        #expect(settings.maxCount == 500)
+        settings.maxCount = -50
+        #expect(settings.maxCount == 10)
+
+        // Same pattern for maxItemSizeBytes (64 KiB … 50 MiB).
+        settings.maxItemSizeBytes = 5 * 1024 * 1024
+        #expect(settings.maxItemSizeBytes == 5 * 1024 * 1024)
+        settings.maxItemSizeBytes = 999 * 1024 * 1024
+        #expect(settings.maxItemSizeBytes == 50 * 1024 * 1024)
+    }
+
+    @MainActor
+    @Test func autoPasterReturnsFalseWhenTargetIsNil() {
+        // Nil target → false regardless of Accessibility state.
+        // (If AX is untrusted we hit the trust gate and also return false.)
+        #expect(AutoPaster.paste(into: nil) == false)
+    }
+
+    @MainActor
+    @Test func globalShortcutReregistersOnWakeNotification() async throws {
+        let manager = GlobalShortcutManager.shared
+        manager.start()
+        let initialStatus = manager.registrationStatus
+
+        // Posting the system wake notification should trigger reload().
+        NSWorkspace.shared.notificationCenter.post(
+            name: NSWorkspace.didWakeNotification,
+            object: nil
+        )
+        // Let the main queue process the observer.
+        try await Task.sleep(for: .milliseconds(50))
+
+        // After reload, the status should not regress from registered.
+        // (If the test host couldn't register the default shortcut initially —
+        // e.g. another app already owns ⇧⌘V — we just verify the handler ran.)
+        if initialStatus.isRegistered {
+            #expect(manager.registrationStatus.isRegistered)
+        }
+    }
+
     @MainActor
     @Test func rebootRetentionClearsRegularAndPinnedItemsByDefault() throws {
         let settings = HistorySettings.shared

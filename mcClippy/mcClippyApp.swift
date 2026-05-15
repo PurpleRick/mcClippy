@@ -57,6 +57,11 @@ struct MenuBarControlsView: View {
     @Query private var items: [Item]
     @ObservedObject private var shortcutStore = ShortcutStore.shared
 
+    private var privateModeActive: Bool {
+        guard let until = PasteboardMonitor.shared.privateModeUntil else { return false }
+        return until > Date()
+    }
+
     var body: some View {
         Button("Show Paste History  \(shortcutStore.current.displayString)") {
             PasteHistoryPanelController.shared.toggle()
@@ -68,8 +73,10 @@ struct MenuBarControlsView: View {
 
         Divider()
 
-        Button("Pause Monitoring") { PasteboardMonitor.shared.isPaused.toggle() }
-        Button("Private Mode (10 min)") {
+        Button(PasteboardMonitor.shared.isPaused ? "Resume Monitoring" : "Pause Monitoring") {
+            PasteboardMonitor.shared.isPaused.toggle()
+        }
+        Button(privateModeActive ? "Private Mode (Active)" : "Private Mode (10 min)") {
             PasteboardMonitor.shared.privateModeUntil = Date().addingTimeInterval(10 * 60)
         }
         Button("Exclude Frontmost App") { AppExclusionStore.shared.excludeFrontmost() }
@@ -78,12 +85,15 @@ struct MenuBarControlsView: View {
 
         Button("Clear All Unpinned", role: .destructive) {
             for item in items where !item.isPinned { modelContext.delete(item) }
+            try? modelContext.save()
         }
         Button("Clear Images Only", role: .destructive) {
             for item in items where item.type == .image && !item.isPinned { modelContext.delete(item) }
+            try? modelContext.save()
         }
         Button("Clear Sensitive Items", role: .destructive) {
             for item in items where item.isSensitive { modelContext.delete(item) }
+            try? modelContext.save()
         }
 
         Divider()
@@ -118,6 +128,7 @@ private struct GeneralSettingsView: View {
     @ObservedObject private var autoPaste = AutoPasteSettings.shared
     @ObservedObject private var launchAtLogin = LaunchAtLoginSettings.shared
     @ObservedObject private var historySettings = HistorySettings.shared
+    @ObservedObject private var ocrSettings = OCRSettings.shared
     @State private var isAccessibilityTrusted = AccessibilityHelper.isTrusted()
 
     var body: some View {
@@ -166,6 +177,13 @@ private struct GeneralSettingsView: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
+            }
+
+            Section("Text Extraction (OCR)") {
+                Toggle("Extract text from images on demand", isOn: $ocrSettings.isEnabled)
+                Text("When enabled, right-click an image and choose Paste as Text to extract text using Apple's Vision framework. Runs locally on this Mac — no network, no data leaves your device.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
 
             Section("History") {
@@ -255,18 +273,21 @@ private struct HistoryClearControls: View {
                 for item in items where !item.isPinned {
                     modelContext.delete(item)
                 }
+                try? modelContext.save()
             }
 
             Button("Clear Sensitive", role: .destructive) {
                 for item in items where item.isSensitive {
                     modelContext.delete(item)
                 }
+                try? modelContext.save()
             }
 
             Button("Clear All", role: .destructive) {
                 for item in items {
                     modelContext.delete(item)
                 }
+                try? modelContext.save()
             }
         }
         .controlSize(.small)
@@ -409,7 +430,7 @@ final class PasteHistoryPanelController {
             object: panel,
             queue: .main
         ) { _ in
-            Task { @MainActor in PasteHistoryPanelController.shared.close() }
+            MainActor.assumeIsolated { PasteHistoryPanelController.shared.close() }
         }
 
         return panel
@@ -787,6 +808,11 @@ enum PasteboardSerializer {
     }
 
     private static func plainTextValue(for item: Item) -> String? {
+        if item.type == .image {
+            // Images expose extracted text only — there is no UTF-8 decoding of
+            // the image blob. Empty string means OCR ran and found nothing.
+            return item.ocrText.flatMap { $0.isEmpty ? nil : $0 }
+        }
         guard let data = decodedData(for: item),
               let value = String(data: data, encoding: .utf8) else { return nil }
 
@@ -906,6 +932,8 @@ final class GlobalShortcutManager: ObservableObject {
 
     private var hotKeyRef: EventHotKeyRef?
     private var eventHandlerRef: EventHandlerRef?
+    private var wakeObserver: NSObjectProtocol?
+    private var sessionActiveObserver: NSObjectProtocol?
     private var isStarted = false
     @Published private(set) var registrationStatus = ShortcutRegistrationStatus.notStarted(.default)
 
@@ -941,6 +969,21 @@ final class GlobalShortcutManager: ObservableObject {
             nil,
             &eventHandlerRef
         )
+
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            MainActor.assumeIsolated { GlobalShortcutManager.shared.reload() }
+        }
+        sessionActiveObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.sessionDidBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            MainActor.assumeIsolated { GlobalShortcutManager.shared.reload() }
+        }
 
         reload()
     }
@@ -1011,6 +1054,8 @@ final class GlobalShortcutManager: ObservableObject {
     }
 
     deinit {
+        if let wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver) }
+        if let sessionActiveObserver { NSWorkspace.shared.notificationCenter.removeObserver(sessionActiveObserver) }
         if let hotKeyRef { UnregisterEventHotKey(hotKeyRef) }
         if let eventHandlerRef { RemoveEventHandler(eventHandlerRef) }
     }

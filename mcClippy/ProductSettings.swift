@@ -88,15 +88,26 @@ final class HistorySettings: ObservableObject {
 
     @Published var maxCount: Int {
         didSet {
-            maxCount = max(10, min(maxCount, 500))
-            UserDefaults.standard.set(maxCount, forKey: maxCountKey)
+            // Self-assignment in didSet retriggers didSet — guard against the
+            // infinite recursion that crashed the Settings panel when the
+            // stepper wrote an already-in-range value.
+            let clamped = max(10, min(maxCount, 500))
+            if maxCount != clamped {
+                maxCount = clamped
+            } else {
+                UserDefaults.standard.set(maxCount, forKey: maxCountKey)
+            }
         }
     }
 
     @Published var maxItemSizeBytes: Int {
         didSet {
-            maxItemSizeBytes = max(64 * 1024, min(maxItemSizeBytes, 50 * 1024 * 1024))
-            UserDefaults.standard.set(maxItemSizeBytes, forKey: maxItemSizeKey)
+            let clamped = max(64 * 1024, min(maxItemSizeBytes, 50 * 1024 * 1024))
+            if maxItemSizeBytes != clamped {
+                maxItemSizeBytes = clamped
+            } else {
+                UserDefaults.standard.set(maxItemSizeBytes, forKey: maxItemSizeKey)
+            }
         }
     }
 
@@ -176,6 +187,25 @@ final class HistorySettings: ObservableObject {
             self.pinnedRetentionPolicy = policy
         } else {
             self.pinnedRetentionPolicy = .untilReboot
+        }
+    }
+}
+
+@MainActor
+final class OCRSettings: ObservableObject {
+    static let shared = OCRSettings()
+    private let defaultsKey = "mcClippy.ocr.enabled"
+
+    @Published var isEnabled: Bool {
+        didSet { UserDefaults.standard.set(isEnabled, forKey: defaultsKey) }
+    }
+
+    private init() {
+        if UserDefaults.standard.object(forKey: defaultsKey) == nil {
+            self.isEnabled = true
+            UserDefaults.standard.set(true, forKey: defaultsKey)
+        } else {
+            self.isEnabled = UserDefaults.standard.bool(forKey: defaultsKey)
         }
     }
 }
