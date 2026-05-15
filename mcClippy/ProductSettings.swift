@@ -123,15 +123,6 @@ final class HistorySettings: ObservableObject {
         }
     }
 
-    var maxAgeDays: Int {
-        get { regularRetentionPolicy.maxAgeDays ?? 0 }
-        set {
-            let clamped = max(0, min(newValue, 365))
-            regularRetentionPolicy = ClipboardRetentionPolicy.ageLimited(days: clamped)
-            UserDefaults.standard.set(clamped, forKey: maxAgeDaysKey)
-        }
-    }
-
     var maxItemSizeMegabytes: Int {
         get { maxItemSizeBytes / 1_048_576 }
         set { maxItemSizeBytes = newValue * 1_048_576 }

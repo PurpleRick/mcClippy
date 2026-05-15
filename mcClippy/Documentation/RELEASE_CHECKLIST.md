@@ -1,48 +1,46 @@
 # Release Checklist
 
-## Before Archive
+Releases are tag-driven. Push a `v*.*.*` tag and the workflow at [`.github/workflows/release.yml`](../../.github/workflows/release.yml) builds, ad-hoc signs, packages a zip + sha256, and publishes the GitHub Release.
 
-- [ ] Confirm `ENABLE_APP_SANDBOX = NO` for Release.
-- [ ] Confirm bundle display name.
-- [ ] Confirm bundle identifier.
-- [ ] Confirm app category.
-- [ ] Add final app icon.
-- [ ] Confirm version and build number.
-- [ ] Run unit tests.
-- [ ] Run UI tests.
-- [ ] Test first launch on a clean user account.
-- [ ] Test Accessibility permission request.
-- [ ] Test auto-paste into TextEdit, Safari, Terminal, and a password field.
-- [ ] Test private mode.
-- [ ] Test app exclusions.
-- [ ] Test encrypted history after relaunch.
+## Pre-Tag Verification
 
-## Archive and Sign
+- [ ] All tests green: `xcodebuild -project mcClippy.xcodeproj -scheme mcClippy -destination 'platform=macOS' -only-testing:mcClippyTests -parallel-testing-enabled NO test`
+- [ ] Local Release build succeeds: `xcodebuild ... -configuration Release build`
+- [ ] `CHANGELOG.md` has a section for the new version.
+- [ ] `MARKETING_VERSION` will match the tag (the workflow injects it from the tag automatically).
+- [ ] Spot-check on a fresh `tccutil reset Accessibility makmaj.mcClippy` to verify the Accessibility prompt and auto-paste flow.
+- [ ] Spot-check the global shortcut after a sleep/wake cycle.
+- [ ] If the bundle structure changed, confirm `PrivacyInfo.xcprivacy` landed in `Contents/Resources/`.
 
-- [ ] Select Release configuration.
-- [ ] Archive in Xcode.
-- [ ] Sign with Developer ID Application certificate.
-- [ ] Enable hardened runtime if needed by distribution workflow.
-- [ ] Export notarization-ready app.
+## Tag and Publish
 
-## Notarize
+```bash
+git tag v1.1.x
+git push origin v1.1.x
+```
 
-- [ ] Submit to Apple notary service.
-- [ ] Wait for notarization success.
-- [ ] Staple ticket to app.
-- [ ] Verify Gatekeeper accepts the app on a clean machine.
+The workflow takes ~1–2 min. When it finishes, the release is at `https://github.com/PurpleRick/mcClippy/releases/tag/v1.1.x` with the zip + sha256 attached.
 
-## Package
+## Post-Release
 
-- [ ] Create signed DMG or PKG.
-- [ ] Include app and Applications shortcut if using DMG.
-- [ ] Verify package install/uninstall behavior.
-- [ ] Verify app launches after install.
-- [ ] Verify login item setting works after install.
+- [ ] Verify the zip on a fresh user account or VM (Gatekeeper prompt + `xattr -dr` instruction).
+- [ ] Update the install instructions in `README.md` if the version-bumped URL is referenced.
 
-## Publish
+## Deferred until Apple Developer Enrollment
 
-- [ ] Publish release notes.
-- [ ] Publish privacy/security notes.
-- [ ] Publish troubleshooting steps for Accessibility and auto-paste.
-- [ ] Tag release in source control.
+These steps activate once a paid Apple Developer Program membership is set up. The workflow has commented-out stubs.
+
+- [ ] Add repository secrets: `APPLE_CERT_BASE64`, `APPLE_CERT_PASSWORD`, `APPLE_TEAM_ID`, `APPLE_NOTARY_USER`, `APPLE_NOTARY_PASSWORD`.
+- [ ] Replace `CODE_SIGN_IDENTITY="-"` with `"Developer ID Application"` and supply `DEVELOPMENT_TEAM`.
+- [ ] Enable hardened runtime.
+- [ ] After build, `xcrun notarytool submit ... --wait` and `xcrun stapler staple`.
+- [ ] Repackage the zip with the stapled `.app`.
+- [ ] Drop the `xattr -dr com.apple.quarantine` instruction from the release notes — Gatekeeper will trust the notarized build.
+
+## Deferred until MAS Build (planned v1.2.0)
+
+- [ ] Add `mcClippy.entitlements` with `com.apple.security.app-sandbox`.
+- [ ] Add a `ReleaseMAS` build configuration.
+- [ ] Implement SwiftData container migration so users upgrading from direct distribution find their history under the MAS sandbox container.
+- [ ] App Store Connect setup + TestFlight beta cycle.
+- [ ] Verify auto-paste under sandbox via the `kTCCServicePostEvent` TCC privilege (separate from full Accessibility).

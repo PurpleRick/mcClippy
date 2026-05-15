@@ -168,8 +168,10 @@ private struct GeneralSettingsView: View {
                                 .foregroundStyle(.orange)
                                 .font(.caption)
                             Button("Request Accessibility Access") {
+                                // The system prompt is async — reading isTrusted() here would
+                                // always return false. The 1 Hz `.task` poll below catches the
+                                // grant once the user acts on the prompt.
                                 AccessibilityHelper.requestAccess()
-                                isAccessibilityTrusted = AccessibilityHelper.isTrusted()
                             }
                         }
                     }
