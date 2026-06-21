@@ -95,6 +95,16 @@ struct ContentView: View {
             searchFocused = true
             if selectedID == nil { selectedID = filteredItems.first?.id }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .pasteHistoryPanelDidShow)) { _ in
+            searchFocused = true
+            // The panel reuses its hosting view, so selection would otherwise
+            // persist from the previous open. Honor the user's preference.
+            if BehaviorSettings.shared.openSelectionAtTop {
+                selectedID = filteredItems.first?.id
+            } else if selectedID == nil {
+                selectedID = filteredItems.first?.id
+            }
+        }
         .onChange(of: filteredItems.map(\.id)) { _, new in
             if let id = selectedID, !new.contains(id) {
                 selectedID = new.first

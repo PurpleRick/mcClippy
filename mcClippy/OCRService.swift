@@ -5,6 +5,7 @@
 
 import Foundation
 import ImageIO
+import os
 import Vision
 
 /// On-device text recognition for image clipboard items.
@@ -78,6 +79,7 @@ actor OCRService {
         do {
             try handler.perform([request])
         } catch {
+            Log.ocr.error("Vision text recognition failed: \(error.localizedDescription, privacy: .public)")
             return nil
         }
 

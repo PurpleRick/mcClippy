@@ -7,6 +7,7 @@ import AppKit
 import Carbon
 import Combine
 import CryptoKit
+import os
 import SwiftData
 import SwiftUI
 
@@ -17,9 +18,13 @@ struct mcClippyApp: App {
     static let sharedModelContainer: ModelContainer = {
         let schema = Schema([Item.self])
         let config = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
+        // Compact the store while it's still closed — must happen before the
+        // container opens it (see StoreMaintenance for why).
+        StoreMaintenance.compactAtLaunch(storeURL: config.url)
         do {
             return try ModelContainer(for: schema, configurations: [config])
         } catch {
+            Log.app.fault("Could not create ModelContainer: \(error.localizedDescription, privacy: .public)")
             fatalError("Could not create ModelContainer: \(error)")
         }
     }()
@@ -129,6 +134,7 @@ private struct GeneralSettingsView: View {
     @ObservedObject private var launchAtLogin = LaunchAtLoginSettings.shared
     @ObservedObject private var historySettings = HistorySettings.shared
     @ObservedObject private var ocrSettings = OCRSettings.shared
+    @ObservedObject private var behaviorSettings = BehaviorSettings.shared
     @State private var isAccessibilityTrusted = AccessibilityHelper.isTrusted()
 
     var body: some View {
@@ -153,6 +159,13 @@ private struct GeneralSettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.red)
                 }
+            }
+
+            Section("Behavior") {
+                Toggle("Start at the top of the list when opening", isOn: $behaviorSettings.openSelectionAtTop)
+                Text("When on, the shortcut always highlights your most recent item. When off, it restores whatever was selected last time.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Auto-paste") {
@@ -403,6 +416,10 @@ final class PasteHistoryPanelController {
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         installKeyMonitor()
+        // The hosting view persists across show/hide, so ContentView's onAppear
+        // won't fire again — notify it that the panel is being presented so it
+        // can reset selection/scroll per the user's preference.
+        NotificationCenter.default.post(name: .pasteHistoryPanelDidShow, object: nil)
     }
 
     func close() {
@@ -588,7 +605,10 @@ final class PasteboardMonitor {
         }
 
         guard let raw = snapshot.data,
-              let sealedBlob = EncryptionService.seal(raw) else { return }
+              let sealedBlob = EncryptionService.seal(raw) else {
+            Log.capture.error("Capture dropped: failed to seal \(snapshot.sizeBytes, privacy: .public)-byte item")
+            return
+        }
 
         let item = Item(
             type: snapshot.type,
@@ -1115,6 +1135,7 @@ extension Notification.Name {
     static let panelMoveSelectionDown = Notification.Name("panelMoveSelectionDown")
     static let panelPasteSelected = Notification.Name("panelPasteSelected")
     static let panelDismiss = Notification.Name("panelDismiss")
+    static let pasteHistoryPanelDidShow = Notification.Name("pasteHistoryPanelDidShow")
 }
 
 private extension UInt32 {

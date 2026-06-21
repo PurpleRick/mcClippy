@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.1.2
+
+- Added a Behavior setting, **"Start at the top of the list when opening"** (on by default): the shortcut now highlights your most recent item every time, instead of restoring whatever was selected last time. Turn it off to keep the previous remember-last-selection behavior.
+- Added lightweight, privacy-preserving logging via `os.Logger` (subsystem `makmaj.mcClippy`). It records control-flow and failure events only — never clipboard contents, previews, or decrypted data — so issues like a failed seal, a missing Accessibility grant, or an OCR error are now diagnosable. View with `log show --predicate 'subsystem == "makmaj.mcClippy"' --last 1h --info`.
+- The on-disk store is now compacted at launch (WAL checkpoint + VACUUM) before SwiftData opens it. A long-running menu-bar app never shuts down cleanly, so the write-ahead log and free pages from churned items were never reclaimed; this keeps the store file tight on every launch.
+
 ## 1.1.1
 
 - Bundle ID validation: the Exclusions tab now rejects malformed entries (`banana`, `hello.world`) with an inline error and only accepts reverse-DNS-shaped strings.

@@ -8,6 +8,7 @@ import ApplicationServices
 import Carbon
 import Combine
 import Foundation
+import os
 
 @MainActor
 final class AutoPasteSettings: ObservableObject {
@@ -49,10 +50,14 @@ enum AutoPaster {
     @discardableResult
     static func paste(into targetApp: NSRunningApplication?) -> Bool {
         guard AccessibilityHelper.isTrusted() else {
+            Log.paste.notice("Auto-paste skipped: Accessibility not trusted; prompting")
             AccessibilityHelper.requestAccess()
             return false
         }
-        guard let target = targetApp, !target.isTerminated else { return false }
+        guard let target = targetApp, !target.isTerminated else {
+            Log.paste.notice("Auto-paste skipped: target app is nil or terminated")
+            return false
+        }
 
         target.activate(options: [.activateAllWindows])
         attemptPaste(target: target, retriesRemaining: 8)
@@ -74,6 +79,7 @@ enum AutoPaster {
         let key = CGKeyCode(kVK_ANSI_V)
         guard let down = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: true),
               let up = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: false) else {
+            Log.paste.error("Auto-paste failed: could not create ⌘V CGEvent")
             return
         }
         down.flags = .maskCommand

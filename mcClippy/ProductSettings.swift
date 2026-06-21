@@ -186,6 +186,27 @@ final class HistorySettings: ObservableObject {
 }
 
 @MainActor
+final class BehaviorSettings: ObservableObject {
+    static let shared = BehaviorSettings()
+    private let openSelectionAtTopKey = "mcClippy.behavior.openSelectionAtTop"
+
+    /// When true, opening the panel always highlights the top (most recent) item
+    /// instead of restoring whatever was selected last time.
+    @Published var openSelectionAtTop: Bool {
+        didSet { UserDefaults.standard.set(openSelectionAtTop, forKey: openSelectionAtTopKey) }
+    }
+
+    private init() {
+        if UserDefaults.standard.object(forKey: openSelectionAtTopKey) == nil {
+            self.openSelectionAtTop = true
+            UserDefaults.standard.set(true, forKey: openSelectionAtTopKey)
+        } else {
+            self.openSelectionAtTop = UserDefaults.standard.bool(forKey: openSelectionAtTopKey)
+        }
+    }
+}
+
+@MainActor
 final class OCRSettings: ObservableObject {
     static let shared = OCRSettings()
     private let defaultsKey = "mcClippy.ocr.enabled"
