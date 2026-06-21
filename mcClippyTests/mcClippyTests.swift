@@ -8,6 +8,7 @@
 import AppKit
 import Carbon
 import Foundation
+import SQLite3
 import SwiftData
 import Testing
 @testable import mcClippy
@@ -452,5 +453,48 @@ struct mcClippyTests {
         PasteboardMonitor.shared.start(modelContainer: container)
 
         #expect(try context.fetch(FetchDescriptor<Item>()).isEmpty)
+    }
+
+    @Test func storeMaintenancePurgesChangeLogButKeepsItems() throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let storeURL = dir.appendingPathComponent("default.store")
+
+        // Stand up a store that mimics SwiftData's layout: the visible items
+        // table plus Core Data's persistent-history tables, populated so the
+        // history dwarfs the items (the real-world shape we're fixing).
+        var db: OpaquePointer?
+        #expect(sqlite3_open(storeURL.path, &db) == SQLITE_OK)
+        func run(_ sql: String) {
+            #expect(sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK)
+        }
+        run("CREATE TABLE ZITEM (Z_PK INTEGER PRIMARY KEY, ZPLAINTEXTPREVIEW VARCHAR);")
+        run("CREATE TABLE ATRANSACTION (Z_PK INTEGER PRIMARY KEY, ZTIMESTAMP FLOAT);")
+        run("CREATE TABLE ACHANGE (Z_PK INTEGER PRIMARY KEY, ZTRANSACTIONID INTEGER);")
+        run("CREATE TABLE ATRANSACTIONSTRING (Z_PK INTEGER PRIMARY KEY);")
+        for i in 1...3 { run("INSERT INTO ZITEM (ZPLAINTEXTPREVIEW) VALUES ('item-\(i)');") }
+        for i in 1...500 { run("INSERT INTO ATRANSACTION (ZTIMESTAMP) VALUES (\(Double(i)));") }
+        for i in 1...700 { run("INSERT INTO ACHANGE (ZTRANSACTIONID) VALUES (\(i));") }
+        run("INSERT INTO ATRANSACTIONSTRING DEFAULT VALUES;")
+        sqlite3_close(db)
+
+        StoreMaintenance.compactAtLaunch(storeURL: storeURL)
+
+        var verify: OpaquePointer?
+        #expect(sqlite3_open(storeURL.path, &verify) == SQLITE_OK)
+        defer { sqlite3_close(verify) }
+        func count(_ table: String) -> Int {
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(verify, "SELECT COUNT(*) FROM \(table);", -1, &stmt, nil) == SQLITE_OK
+            else { return -1 }
+            defer { sqlite3_finalize(stmt) }
+            return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int64(stmt, 0)) : -1
+        }
+        #expect(count("ZITEM") == 3)         // visible history is untouched
+        #expect(count("ATRANSACTION") == 0)  // change log fully purged
+        #expect(count("ACHANGE") == 0)
+        #expect(count("ATRANSACTIONSTRING") == 0)
     }
 }
