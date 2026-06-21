@@ -2,6 +2,31 @@
 
 mcClippy is a local-first macOS menu bar clipboard history app. The app intentionally keeps clipboard content on-device and treats copied data as sensitive by default.
 
+## Architecture at a Glance
+
+A clipboard item flows through four stages — capture, secure + store, browse, paste back — supported by always-on services (the Keychain key, launch-time store maintenance, on-demand OCR, and logging). Everything stays on-device.
+
+```mermaid
+flowchart TD
+  PB[System pasteboard] -->|0.7s poll · changeCount| MON[PasteboardMonitor]
+  MON --> SER[PasteboardSerializer.snapshot]
+  SER --> DET[SensitiveContentDetector]
+  DET --> SEAL[EncryptionService.seal · ChaChaPoly]
+  KC[(Keychain · 256-bit key)] -.-> SEAL
+  SEAL --> STORE[(SwiftData store · Item + sealed blob)]
+  MAINT[StoreMaintenance · purge log + VACUUM at launch] -.-> STORE
+  SHORT[Global shortcut · Carbon hotkey] --> PANEL[PasteHistoryPanel · NSPanel/ContentView]
+  MENU[MenuBarExtra / Settings] --> PANEL
+  STORE -->|@Query| PANEL
+  PANEL -->|select| OPEN[decodedData · EncryptionService.open]
+  KC -.-> OPEN
+  OPEN --> RESTORE[PasteboardSerializer.restore]
+  RESTORE --> PB
+  RESTORE --> AP[AutoPaster · CGEvent ⌘V → previous app]
+  PANEL -->|paste as text| OCR[OCRService · Vision]
+  OCR --> STORE
+```
+
 ## Runtime Components
 
 | Component | File | Responsibility |
@@ -13,7 +38,10 @@ mcClippy is a local-first macOS menu bar clipboard history app. The app intentio
 | Auto-paste | `AutoPaste.swift` | Accessibility trust checks and Cmd+V CGEvent posting. |
 | App exclusions | `AppExclusions.swift` | UserDefaults-backed bundle-ID denylist. |
 | Shortcut settings | `Shortcuts.swift` | Shortcut model, storage, recorder UI, and hotkey reload trigger. |
-| Product settings | `ProductSettings.swift` | History limits and launch-at-login settings. |
+| Product settings | `ProductSettings.swift` | History limits, retention policies, launch-at-login, OCR toggle, and panel behavior (open-at-top). |
+| OCR | `OCRService.swift` | On-demand Vision text recognition for image items, concurrency-capped and deduped. |
+| Store maintenance | `StoreMaintenance.swift` | Launch-time WAL checkpoint, persistent-history purge, and VACUUM, run before the store opens. |
+| Logging | `Log.swift` | Privacy-preserving `os.Logger` categories; never logs clipboard contents. |
 | Onboarding | `Onboarding.swift` | First-run explanation of permissions and privacy behavior. |
 
 ## Data Flow
@@ -38,6 +66,16 @@ mcClippy is a local-first macOS menu bar clipboard history app. The app intentio
 6. The panel closes.
 7. Focus is returned to the previously-active app unconditionally, so the user always lands back where they were.
 8. If enabled and Accessibility is trusted, `AutoPaster` polls for the target app's `isActive` (up to ~400 ms / 8 × 50 ms retries) and then posts Cmd+V via the HID event tap (`.cghidEventTap`). The HID tap is more reliable across destination apps than the session tap, which some Electron/Chromium apps silently drop.
+
+## Launch Maintenance
+
+Before the SwiftData `ModelContainer` opens the store, `StoreMaintenance.compactAtLaunch` opens the SQLite file directly (exclusive access) and:
+
+1. Purges Core Data's persistent-history log (`ATRANSACTION` / `ACHANGE`). That log appends a row for every insert and delete and is only consumed by CloudKit-synced or multi-process readers — neither of which mcClippy has — so it would otherwise grow without bound. The purge is defensive: it no-ops if the internal tables are absent and rolls back on any error.
+2. Runs `PRAGMA wal_checkpoint(TRUNCATE)` to fold the write-ahead log back into the main store (a long-running menu-bar app never shuts down cleanly, so this never happens on its own).
+3. Runs `VACUUM` to reclaim free pages.
+
+This must run while the store is closed; a second writer on the same file once SwiftData has opened it is unsafe.
 
 ## Shortcut Manager Wake/Session Resilience
 
